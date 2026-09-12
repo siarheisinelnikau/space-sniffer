@@ -132,6 +132,7 @@ fn glob_matches(pattern: &[char], name: &[char]) -> bool {
     let (mut star, mut retry_name) = (None, 0);
     while name_index < name.len() {
         if pattern_index < pattern.len()
+            && pattern[pattern_index] != '*'
             && (pattern[pattern_index] == '?' || pattern[pattern_index] == name[name_index])
         {
             pattern_index += 1;
@@ -306,6 +307,13 @@ mod tests {
             Filter::parse("a*b*c")
                 .unwrap()
                 .matches(&node("aaabbbc", 1, EntryKind::File))
+        );
+        // A literal asterisk in a Unix filename must still be consumed by the
+        // wildcard, rather than preventing the wildcard from matching further.
+        assert!(
+            Filter::parse("*a")
+                .unwrap()
+                .matches(&node("*ba", 1, EntryKind::File))
         );
     }
 
