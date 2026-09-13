@@ -87,6 +87,10 @@ fn scan_with_progress(
 ) -> Result<ScanTree, String> {
     let started = Instant::now();
     check_cancelled(cancel)?;
+    // Make paths suitable for reveal/export without resolving symlinks.
+    let absolute_path = std::path::absolute(path)
+        .map_err(|error| format!("Unable to resolve {}: {error}", path.display()))?;
+    let path = absolute_path.as_path();
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("Unable to inspect {}: {error}", path.display()))?;
     if is_link(&metadata) {
@@ -344,14 +348,12 @@ mod tests {
             // Resolve and verify the exact temporary target before cleanup.
             if let (Ok(path), Ok(parent)) =
                 (self.0.canonicalize(), std::env::temp_dir().canonicalize())
+                && path.parent() == Some(parent.as_path())
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("space-sniffer-test-"))
             {
-                if path.parent() == Some(parent.as_path())
-                    && path.file_name().is_some_and(|name| {
-                        name.to_string_lossy().starts_with("space-sniffer-test-")
-                    })
-                {
-                    let _ = fs::remove_dir_all(path);
-                }
+                let _ = fs::remove_dir_all(path);
             }
         }
     }
