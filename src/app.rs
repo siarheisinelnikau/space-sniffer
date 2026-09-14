@@ -57,6 +57,7 @@ impl App {
         cc.egui_ctx.style_mut(|style| {
             style.spacing.item_spacing = Vec2::new(10.0, 8.0);
             style.spacing.button_padding = Vec2::new(13.0, 8.0);
+            style.spacing.slider_width = 70.0;
             style
                 .text_styles
                 .insert(egui::TextStyle::Body, FontId::proportional(14.0));
@@ -64,9 +65,17 @@ impl App {
                 .text_styles
                 .insert(egui::TextStyle::Button, FontId::proportional(14.0));
         });
+        let mut app = Self::demo_state();
+        if let Some(path) = path {
+            app.begin_scan(path);
+        }
+        app
+    }
+
+    fn demo_state() -> Self {
         let tree = crate::demo::tree();
         let weights = tree.nodes.iter().map(|n| n.size).collect();
-        let mut app = Self {
+        Self {
             tree,
             weights,
             scan: None,
@@ -89,11 +98,7 @@ impl App {
             revision: 0,
             map_cache: None,
             list_cache: None,
-        };
-        if let Some(path) = path {
-            app.begin_scan(path);
         }
-        app
     }
 
     fn begin_scan(&mut self, path: PathBuf) {
@@ -448,7 +453,7 @@ impl App {
                             }
                             let response = ui.selectable_label(
                                 self.selected == id,
-                                format!("{}  {}", if node.is_dir() { "▸" } else { "·" }, node.name),
+                                format!("{}  {}", if node.is_dir() { "+" } else { "·" }, node.name),
                             );
                             ui.label(
                                 RichText::new(format_bytes(self.weights[id]))
@@ -678,7 +683,7 @@ impl eframe::App for App {
                 }
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!self.back.is_empty(), egui::Button::new("←"))
+                        .add_enabled(!self.back.is_empty(), egui::Button::new("<"))
                         .clicked()
                         && let Some(id) = self.back.pop()
                     {
@@ -687,7 +692,7 @@ impl eframe::App for App {
                         self.selected = id;
                     }
                     if ui
-                        .add_enabled(!self.forward.is_empty(), egui::Button::new("→"))
+                        .add_enabled(!self.forward.is_empty(), egui::Button::new(">"))
                         .clicked()
                         && let Some(id) = self.forward.pop()
                     {
@@ -697,7 +702,7 @@ impl eframe::App for App {
                     }
                     let parent = self.tree.nodes[self.zoom].parent;
                     if ui
-                        .add_enabled(parent.is_some(), egui::Button::new("↑"))
+                        .add_enabled(parent.is_some(), egui::Button::new("Up"))
                         .clicked()
                         && let Some(id) = parent
                     {
@@ -752,7 +757,7 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Filter").color(MUTED));
                     let response = ui.add_sized(
-                        [ui.available_width() - 310.0, 28.0],
+                        [(ui.available_width() - 350.0).max(100.0), 28.0],
                         egui::TextEdit::singleline(&mut self.query)
                             .hint_text("*.zip; >100mb; |backup*"),
                     );
@@ -961,4 +966,63 @@ fn reveal(node: &Node) -> Result<(), String> {
     result
         .map(|_| ())
         .map_err(|error| format!("Could not reveal entry: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use space_sniffer::model::EntryKind;
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    #[test]
+    fn new_scan_with_invalid_query_rebuilds_weights_for_the_new_tree() {
+        let mut app = App::demo_state();
+        app.query = "*.zip".into();
+        app.apply_filter();
+        app.query = ">oops".into();
+        app.apply_filter();
+        let mut tree = crate::demo::tree();
+        let root = tree.root;
+        for i in 0..100 {
+            let id = tree.nodes.len();
+            tree.nodes.push(Node {
+                name: format!("extra-{i}.zip"),
+                path: PathBuf::from(format!("extra-{i}.zip")),
+                kind: EntryKind::File,
+                size: 100,
+                children: vec![],
+                parent: Some(root),
+                modified: None,
+            });
+            tree.nodes[root].children.push(id);
+            tree.nodes[root].size += 100;
+        }
+        let expected = Filter::parse("*.zip").unwrap().weights(&tree);
+        let (sender, receiver) = mpsc::channel();
+        sender.send(ScanEvent::Finished(Ok(tree))).unwrap();
+        app.scan = Some(ScanHandle {
+            receiver,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        app.poll_scan(&egui::Context::default());
+        assert_eq!(app.weights, expected);
+        assert_eq!(app.weights.len(), app.tree.nodes.len());
+        assert!(app.filter_error.is_some());
+        assert_eq!(app.applied, "*.zip");
+    }
+
+    #[test]
+    fn nested_map_respects_depth_and_only_uses_valid_nodes() {
+        let tree = crate::demo::tree();
+        let weights = tree.nodes.iter().map(|node| node.size).collect::<Vec<_>>();
+        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 600.0));
+        let mut tiles = Vec::new();
+        collect_tiles(&tree, &weights, tree.root, bounds, 2, 0, &mut tiles);
+        assert!(tiles.len() > tree.nodes[tree.root].children.len());
+        for tile in tiles {
+            assert!(tile.id < tree.nodes.len());
+            assert!(tile.level <= 2);
+            assert!(bounds.contains_rect(tile.rect));
+        }
+    }
 }
