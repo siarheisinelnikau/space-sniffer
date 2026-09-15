@@ -205,6 +205,7 @@ impl App {
 
     fn header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("header")
+            .exact_height(128.0)
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
