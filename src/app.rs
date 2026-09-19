@@ -532,7 +532,7 @@ impl App {
             painter.rect_stroke(
                 rect,
                 2.0,
-                Stroke::new(1.0, color.gamma_multiply(1.3)),
+                Stroke::new(1.0_f32, color.gamma_multiply(1.3)),
                 StrokeKind::Inside,
             );
             let text_rect = if tile.container {
@@ -583,7 +583,7 @@ impl App {
             painter.rect_stroke(
                 tile.rect.shrink(1.0),
                 2.0,
-                Stroke::new(2.0, Color32::WHITE),
+                Stroke::new(2.0_f32, Color32::WHITE),
                 StrokeKind::Inside,
             );
         }
