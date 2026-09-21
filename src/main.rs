@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
-mod demo;
+mod drives;
 
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 
@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
         println!(
-            "Space Sniffer\n\n  space-sniffer [PATH]        Open the app, optionally scanning PATH\n  space-sniffer --scan PATH   Print a disk usage summary\n  space-sniffer --help        Show this help\n\nWithout PATH the app displays synthetic demo data. Files are never deleted."
+            "Space Sniffer\n\n  space-sniffer [PATH]        Open the app and watch PATH for live changes\n  space-sniffer --scan PATH   Print a disk usage summary\n  space-sniffer --help        Show this help\n\nChoose a drive or folder to begin. File changes update the map automatically."
         );
         return Ok(());
     }
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Space Sniffer")
             .with_inner_size([1280.0, 760.0])
-            .with_min_inner_size([960.0, 640.0])
+            .with_min_inner_size([800.0, 520.0])
             .with_icon(app_icon()),
         ..Default::default()
     };
