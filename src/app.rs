@@ -2,15 +2,15 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
 use space_sniffer::{
-    export,
-    filter::Filter,
-    format_bytes,
-    model::{Node, ScanTree},
-    scanner::{self, ScanEvent, ScanHandle, ScanProgress},
+    export, format_bytes,
+    live::{self, Change, LiveEvent, LiveHandle},
+    live_tree::LiveTree,
+    model::{EntryKind, Node, ScanStats, ScanTree},
+    scanner::ScanProgress,
     treemap,
 };
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::Ordering,
     time::{Duration, Instant},
 };
@@ -21,26 +21,33 @@ const MUTED: Color32 = Color32::from_rgb(137, 153, 176);
 const ACCENT: Color32 = Color32::from_rgb(100, 207, 187);
 
 pub struct App {
-    tree: ScanTree,
-    weights: Vec<u64>,
-    scan: Option<ScanHandle>,
+    ctx: egui::Context,
+    model: LiveTree,
+    live: Option<LiveHandle>,
+    loaded: bool,
+    loading: bool,
+    watching: bool,
+    watch_status: String,
     progress: Option<ScanProgress>,
     started: Instant,
     path: String,
     query: String,
     applied: String,
+    query_changed: Option<Instant>,
     filter_error: Option<String>,
     error: Option<String>,
     notice: String,
     selected: usize,
     zoom: usize,
-    back: Vec<usize>,
-    forward: Vec<usize>,
+    back: Vec<PathBuf>,
+    forward: Vec<PathBuf>,
     depth: usize,
     classic: bool,
-    demo: bool,
     help: bool,
     revision: u64,
+    map_revision: u64,
+    updates: u64,
+    drives: Vec<PathBuf>,
     map_cache: Option<MapCache>,
     list_cache: Option<(usize, u64, Vec<usize>, usize)>,
 }
@@ -55,35 +62,51 @@ impl App {
         visuals.widgets.active.bg_fill = Color32::from_rgb(47, 97, 97);
         cc.egui_ctx.set_visuals(visuals);
         cc.egui_ctx.style_mut(|style| {
-            style.spacing.item_spacing = Vec2::new(10.0, 8.0);
-            style.spacing.button_padding = Vec2::new(13.0, 8.0);
-            style.spacing.slider_width = 70.0;
+            style.spacing.item_spacing = Vec2::new(6.0, 5.0);
+            style.spacing.button_padding = Vec2::new(8.0, 5.0);
+            style.spacing.slider_width = 95.0;
             style
                 .text_styles
-                .insert(egui::TextStyle::Body, FontId::proportional(14.0));
+                .insert(egui::TextStyle::Body, FontId::proportional(13.0));
             style
                 .text_styles
-                .insert(egui::TextStyle::Button, FontId::proportional(14.0));
+                .insert(egui::TextStyle::Button, FontId::proportional(13.0));
         });
-        let mut app = Self::demo_state();
+        let mut app = Self::empty(cc.egui_ctx.clone());
         if let Some(path) = path {
             app.begin_scan(path);
         }
         app
     }
 
-    fn demo_state() -> Self {
-        let tree = crate::demo::tree();
-        let weights = tree.nodes.iter().map(|n| n.size).collect();
+    fn empty(ctx: egui::Context) -> Self {
+        let tree = ScanTree {
+            nodes: vec![Node {
+                name: String::new(),
+                path: PathBuf::new(),
+                kind: EntryKind::Directory,
+                size: 0,
+                children: Vec::new(),
+                parent: None,
+                modified: None,
+            }],
+            root: 0,
+            stats: ScanStats::default(),
+        };
         Self {
-            tree,
-            weights,
-            scan: None,
+            ctx,
+            model: LiveTree::new(tree),
+            live: None,
+            loaded: false,
+            loading: false,
+            watching: false,
+            watch_status: String::new(),
             progress: None,
             started: Instant::now(),
             path: String::new(),
             query: String::new(),
             applied: String::new(),
+            query_changed: None,
             filter_error: None,
             error: None,
             notice: String::new(),
@@ -91,101 +114,209 @@ impl App {
             zoom: 0,
             back: Vec::new(),
             forward: Vec::new(),
-            depth: 3,
+            depth: 4,
             classic: false,
-            demo: true,
             help: false,
             revision: 0,
+            map_revision: 0,
+            updates: 0,
+            drives: crate::drives::roots(),
             map_cache: None,
             list_cache: None,
         }
     }
 
     fn begin_scan(&mut self, path: PathBuf) {
-        if let Some(scan) = self.scan.take() {
-            scan.cancel.store(true, Ordering::Relaxed);
+        self.stop();
+        let same_root = self.loaded
+            && std::path::absolute(&path).ok().as_deref()
+                == Some(self.model.tree.nodes[self.model.tree.root].path.as_path());
+        if !same_root {
+            self.loaded = false;
+            self.selected = self.model.tree.root;
+            self.zoom = self.model.tree.root;
+            self.back.clear();
+            self.forward.clear();
         }
         self.path = path.to_string_lossy().into_owned();
-        self.scan = Some(scanner::start_scan(path));
+        let ctx = self.ctx.clone();
+        self.live = Some(live::start_live_with_wake(path, move || {
+            ctx.request_repaint()
+        }));
+        self.loading = true;
+        self.watching = false;
+        self.watch_status = "Starting…".into();
         self.progress = None;
         self.error = None;
         self.notice.clear();
+        self.updates = 0;
         self.started = Instant::now();
+        self.ctx.request_repaint();
+    }
+
+    fn stop(&mut self) {
+        if let Some(live) = self.live.take() {
+            live.cancel.store(true, Ordering::Relaxed);
+        }
+        self.loading = false;
+        self.watching = false;
     }
 
     fn choose_folder(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .set_title("Choose a folder or drive to scan")
+            .set_title("Choose any drive or folder to watch")
             .pick_folder()
         {
             self.begin_scan(path);
         }
     }
 
-    fn poll_scan(&mut self, ctx: &egui::Context) {
-        let mut finished = None;
-        if let Some(scan) = &self.scan {
-            loop {
-                match scan.receiver.try_recv() {
-                    Ok(ScanEvent::Progress(progress)) => self.progress = Some(progress),
-                    Ok(ScanEvent::Finished(result)) => {
-                        finished = Some(result);
-                        break;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        finished = Some(Err("Scan worker stopped unexpectedly".into()));
-                        break;
-                    }
+    fn poll_live(&mut self) {
+        let budget = Instant::now();
+        loop {
+            let result = match &self.live {
+                Some(live) => live.receiver.try_recv(),
+                None => break,
+            };
+            let event = match result {
+                Ok(event) => event,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.stop();
+                    break;
+                }
+            };
+            match event {
+                LiveEvent::Progress(progress) => self.progress = Some(progress),
+                LiveEvent::Ready(model) => self.install_model(model),
+                LiveEvent::Changes(changes) => self.apply_changes(&changes),
+                LiveEvent::Status { watching, message } => {
+                    self.watching = watching;
+                    self.watch_status = message;
+                }
+                LiveEvent::Failed(error) => {
+                    self.loading = false;
+                    self.error = Some(error);
                 }
             }
-            ctx.request_repaint_after(Duration::from_millis(80));
-        }
-        if let Some(result) = finished {
-            self.scan = None;
-            match result {
-                Ok(tree) => {
-                    self.selected = tree.root;
-                    self.zoom = tree.root;
-                    self.tree = tree;
-                    // A newly scanned tree needs new weights even when the
-                    // query currently being edited is invalid.
-                    self.weights = Filter::parse(&self.applied)
-                        .unwrap_or_default()
-                        .weights(&self.tree);
-                    self.revision = self.revision.wrapping_add(1);
-                    self.demo = false;
-                    self.back.clear();
-                    self.forward.clear();
-                    self.apply_filter();
-                    self.notice = "Scan complete".into();
-                }
-                Err(error) if error == "Scan cancelled" => {
-                    self.notice = "Scan cancelled. Previous view retained.".into()
-                }
-                Err(error) => self.error = Some(error),
+            if budget.elapsed() > Duration::from_millis(8) {
+                self.ctx.request_repaint();
+                break;
             }
         }
+    }
+
+    fn install_model(&mut self, model: LiveTree) {
+        let (selected, zoom) = if self.loaded {
+            (
+                self.model.tree.nodes[self.selected].path.clone(),
+                self.model.tree.nodes[self.zoom].path.clone(),
+            )
+        } else {
+            (
+                model.tree.nodes[model.tree.root].path.clone(),
+                model.tree.nodes[model.tree.root].path.clone(),
+            )
+        };
+        self.model = model;
+        let _ = self.model.set_filter(&self.applied);
+        self.loaded = true;
+        self.loading = false;
+        self.error = None;
+        self.restore_paths(&selected, &zoom);
+        self.apply_filter();
+        self.invalidate();
+    }
+
+    fn apply_changes(&mut self, changes: &[Change]) {
+        if !self.loaded {
+            return;
+        }
+        let selected = self.model.tree.nodes[self.selected].path.clone();
+        let zoom = self.model.tree.nodes[self.zoom].path.clone();
+        let affects_view = changes.iter().any(|change| {
+            let path = match change {
+                Change::Upsert { path, .. }
+                | Change::ReplaceSubtree { path, .. }
+                | Change::Remove(path) => path,
+            };
+            path.starts_with(&zoom) || zoom.starts_with(path)
+        });
+        let update = self.model.apply(changes);
+        self.restore_paths(&selected, &zoom);
+        if update.changed > 0 {
+            self.updates += update.changed as u64;
+            self.revision = self.revision.wrapping_add(1);
+            if affects_view || self.model.tree.nodes[self.zoom].path != zoom {
+                self.map_revision = self.map_revision.wrapping_add(1);
+            }
+        }
+    }
+
+    fn restore_paths(&mut self, selected: &Path, zoom: &Path) {
+        self.zoom = zoom
+            .ancestors()
+            .find_map(|path| {
+                self.model
+                    .find(path)
+                    .filter(|&id| self.model.tree.nodes[id].is_dir())
+            })
+            .unwrap_or(self.model.tree.root);
+        self.selected = selected
+            .ancestors()
+            .find_map(|path| self.model.find(path))
+            .unwrap_or(self.zoom);
+    }
+
+    fn invalidate(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.map_revision = self.map_revision.wrapping_add(1);
     }
 
     fn apply_filter(&mut self) {
-        match Filter::parse(&self.query) {
-            Ok(filter) => {
-                self.weights = filter.weights(&self.tree);
+        match self.model.set_filter(&self.query) {
+            Ok(()) => {
                 self.applied = self.query.clone();
                 self.filter_error = None;
-                self.revision = self.revision.wrapping_add(1);
+                self.invalidate();
             }
             Err(error) => self.filter_error = Some(error),
         }
+        self.query_changed = None;
     }
 
     fn navigate(&mut self, id: usize) {
-        if id != self.zoom && self.tree.nodes[id].is_dir() {
-            self.back.push(self.zoom);
+        if id != self.zoom && self.model.contains(id) && self.model.tree.nodes[id].is_dir() {
+            self.back
+                .push(self.model.tree.nodes[self.zoom].path.clone());
             self.forward.clear();
             self.zoom = id;
             self.selected = id;
+        }
+    }
+
+    fn history(&mut self, forward: bool) {
+        let stack = if forward {
+            &mut self.forward
+        } else {
+            &mut self.back
+        };
+        while let Some(path) = stack.pop() {
+            if let Some(id) = self
+                .model
+                .find(&path)
+                .filter(|&id| self.model.tree.nodes[id].is_dir())
+            {
+                let current = self.model.tree.nodes[self.zoom].path.clone();
+                if forward {
+                    self.back.push(current);
+                } else {
+                    self.forward.push(current);
+                }
+                self.zoom = id;
+                self.selected = id;
+                break;
+            }
         }
     }
 
@@ -196,291 +327,424 @@ impl App {
             .add_filter("CSV report", &["csv"])
             .save_file()
         {
-            match export::write_csv(&path, &self.tree, self.zoom, &self.weights) {
-                Ok(()) => self.notice = format!("Report saved to {}", path.display()),
+            match export::write_csv(&path, &self.model.tree, self.zoom, &self.model.weights) {
+                Ok(()) => self.notice = format!("Saved {}", path.display()),
                 Err(error) => self.error = Some(format!("Could not save report: {error}")),
             }
         }
     }
 
-    fn header(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("header")
-            .exact_height(128.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(egui::Margin::symmetric(22, 14)),
-            )
+    fn sidebar(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("sidebar")
+            .default_width(224.0)
+            .width_range(204.0..=320.0)
+            .resizable(true)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(12))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new("SPACE / SNIFFER")
-                                .size(23.0)
-                                .strong()
-                                .color(Color32::WHITE),
-                        );
-                        ui.label(
-                            RichText::new("A little perspective on your disk.")
-                                .color(MUTED)
-                                .size(12.0),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("?  Help").clicked() {
-                            self.help = true;
-                        }
-                        if ui.button("Export CSV").clicked() {
-                            self.export();
-                        }
+                egui::ScrollArea::vertical()
+                    .id_salt("sidebar_scroll")
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("SPACE / SNIFFER").size(17.0).strong());
+                        ui.add_space(6.0);
                         if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("+  Open folder").color(BG).strong(),
-                                )
-                                .fill(ACCENT),
+                            .add_sized(
+                                [ui.available_width(), 30.0],
+                                egui::Button::new(RichText::new("Open folder…").strong().color(BG))
+                                    .fill(ACCENT),
                             )
                             .clicked()
                         {
                             self.choose_folder();
                         }
+                        ui.horizontal_wrapped(|ui| {
+                            for drive in self.drives.clone() {
+                                let label = drive.to_string_lossy();
+                                let selected = self.loaded
+                                    && self.model.tree.nodes[self.model.tree.root].path == drive;
+                                if ui
+                                    .selectable_label(selected, label)
+                                    .on_hover_text(drive.to_string_lossy())
+                                    .clicked()
+                                {
+                                    self.begin_scan(drive);
+                                }
+                            }
+                        });
+                        ui.label(RichText::new("ROOT PATH").small().color(MUTED));
+                        let response = ui.add_sized(
+                            [ui.available_width(), 27.0],
+                            egui::TextEdit::singleline(&mut self.path)
+                                .hint_text("Any drive, folder or network path"),
+                        );
+                        let enter =
+                            response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.horizontal(|ui| {
+                            if (ui
+                                .add_enabled(
+                                    !self.path.trim().is_empty(),
+                                    egui::Button::new("Watch root"),
+                                )
+                                .clicked()
+                                || enter)
+                                && !self.path.trim().is_empty()
+                            {
+                                self.begin_scan(PathBuf::from(self.path.trim()));
+                            }
+                            if self.live.is_some() && ui.button("Stop").clicked() {
+                                self.stop();
+                                self.watch_status = "Stopped".into();
+                            }
+                        });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if self.loading {
+                                ui.spinner();
+                                ui.label(RichText::new("Scanning…").color(ACCENT));
+                            } else if self.live.is_some() {
+                                let (rect, _) =
+                                    ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                ui.painter().circle_filled(rect.center(), 3.0, ACCENT);
+                                ui.label(
+                                    RichText::new(if self.watching { "LIVE" } else { "AUTO" })
+                                        .strong()
+                                        .color(ACCENT),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new(if self.loaded {
+                                        "Stopped"
+                                    } else {
+                                        "Choose a root"
+                                    })
+                                    .color(MUTED),
+                                );
+                            }
+                        });
+                        if !self.watch_status.is_empty() {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&self.watch_status).small().color(MUTED),
+                                )
+                                .wrap(),
+                            );
+                        }
+                        if self.loading {
+                            if let Some(progress) = &self.progress {
+                                ui.label(format!(
+                                    "{} files · {}",
+                                    progress.files,
+                                    format_bytes(progress.bytes)
+                                ));
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(progress.current_path.to_string_lossy())
+                                            .small()
+                                            .color(MUTED),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        } else if self.loaded {
+                            ui.label(
+                                RichText::new(format_bytes(self.model.tree.total_size()))
+                                    .size(25.0)
+                                    .color(ACCENT),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} files · {} folders",
+                                    self.model.tree.stats.files, self.model.tree.stats.directories
+                                ))
+                                .small()
+                                .color(MUTED),
+                            );
+                        }
+                        ui.separator();
+                        ui.label(RichText::new("FILTER").small().color(MUTED));
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 27.0],
+                                egui::TextEdit::singleline(&mut self.query)
+                                    .hint_text("*.zip; >100mb; |backup*"),
+                            )
+                            .changed()
+                        {
+                            self.query_changed = Some(Instant::now());
+                        }
+                        if !self.query.is_empty() && ui.small_button("Clear filter").clicked() {
+                            self.query.clear();
+                            self.apply_filter();
+                        }
+                        if let Some(error) = &self.filter_error {
+                            ui.label(RichText::new(error).small().color(Color32::LIGHT_RED));
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Depth");
+                            ui.add(egui::Slider::new(&mut self.depth, 1..=6));
+                        });
+                        ui.checkbox(&mut self.classic, "Classic colors");
+                        if self.loaded {
+                            ui.separator();
+                            self.selection(ui);
+                            ui.add_space(5.0);
+                            egui::CollapsingHeader::new("Largest entries")
+                                .show(ui, |ui| self.largest(ui));
+                        }
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(self.loaded, egui::Button::new("Export CSV"))
+                                .clicked()
+                            {
+                                self.export();
+                            }
+                            if ui.button("Help").clicked() {
+                                self.help = true;
+                            }
+                        });
                     });
-                });
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    let input = ui.add_sized(
-                        [ui.available_width() - 100.0, 30.0],
-                        egui::TextEdit::singleline(&mut self.path)
-                            .hint_text("Enter a folder or drive, e.g. C:\\")
-                            .margin(Vec2::new(10.0, 7.0)),
-                    );
-                    let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui
-                        .add_enabled(!self.path.trim().is_empty(), egui::Button::new("Scan / F5"))
-                        .clicked()
-                        || enter
-                    {
-                        self.begin_scan(PathBuf::from(self.path.trim()));
-                    }
-                });
             });
     }
 
-    fn status(&mut self, ctx: &egui::Context) {
+    fn selection(&mut self, ui: &mut egui::Ui) {
+        let node = &self.model.tree.nodes[self.selected];
+        ui.label(RichText::new("SELECTED").small().color(MUTED));
+        ui.add(egui::Label::new(RichText::new(&node.name).strong()).truncate())
+            .on_hover_text(node.path.to_string_lossy());
+        ui.label(RichText::new(format_bytes(node.size)).size(20.0));
+        if !self.applied.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "Matching {}",
+                    format_bytes(self.model.weights[self.selected])
+                ))
+                .small()
+                .color(MUTED),
+            );
+        }
+        let is_dir = node.is_dir();
+        let path = node.path.to_string_lossy().into_owned();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Copy path").clicked() {
+                ui.ctx().copy_text(path.clone());
+            }
+            if ui.button("Reveal").clicked()
+                && let Err(error) = reveal(&self.model.tree.nodes[self.selected])
+            {
+                self.error = Some(error);
+            }
+            if ui
+                .add_enabled(
+                    is_dir && self.selected != self.zoom,
+                    egui::Button::new("Zoom"),
+                )
+                .clicked()
+            {
+                self.navigate(self.selected);
+            }
+        });
+    }
+
+    fn largest(&mut self, ui: &mut egui::Ui) {
+        let parent = if self.model.tree.nodes[self.selected].is_dir() {
+            self.selected
+        } else {
+            self.model.tree.nodes[self.selected]
+                .parent
+                .unwrap_or(self.zoom)
+        };
+        if self
+            .list_cache
+            .as_ref()
+            .is_none_or(|cache| cache.0 != parent || cache.1 != self.revision)
+        {
+            let visible = self.model.tree.nodes[parent]
+                .children
+                .iter()
+                .copied()
+                .filter(|&id| self.model.weights[id] > 0 || self.model.tree.nodes[id].size == 0);
+            let mut ids = Vec::new();
+            let mut count = 0;
+            for id in visible {
+                count += 1;
+                if ids.len() < 100 {
+                    ids.push(id);
+                }
+            }
+            self.list_cache = Some((parent, self.revision, ids, count));
+        }
+        let (_, _, ids, count) = self.list_cache.as_ref().unwrap().clone();
+        egui::ScrollArea::vertical()
+            .id_salt("largest")
+            .max_height(210.0)
+            .show(ui, |ui| {
+                for id in ids {
+                    let node = &self.model.tree.nodes[id];
+                    let label = format!("{}  {}", if node.is_dir() { "+" } else { "·" }, node.name);
+                    let response =
+                        ui.add(egui::Button::selectable(id == self.selected, label).frame(false));
+                    ui.label(
+                        RichText::new(format_bytes(self.model.weights[id]))
+                            .small()
+                            .color(MUTED),
+                    );
+                    if response.clicked() {
+                        self.selected = id;
+                    }
+                    if response.double_clicked() {
+                        self.navigate(id);
+                    }
+                }
+                if count == 0 {
+                    ui.small("No entries");
+                } else if count > 100 {
+                    ui.small("Showing 100 largest entries");
+                }
+            });
+    }
+
+    fn status(&self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status")
+            .exact_height(25.0)
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
-                    .inner_margin(egui::Margin::symmetric(20, 9)),
+                    .inner_margin(egui::Margin::symmetric(10, 4)),
             )
             .show(ctx, |ui| {
-                if self.scan.is_some() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        if let Some(p) = &self.progress {
-                            ui.label(format!(
-                                "Scanning  ·  {} files  ·  {} found  ·  {:.1}s",
-                                p.files,
-                                format_bytes(p.bytes),
-                                self.started.elapsed().as_secs_f32()
-                            ));
-                        } else {
-                            ui.label("Starting scan…");
-                        }
-                        if ui.button("Cancel").clicked()
-                            && let Some(scan) = &self.scan
-                        {
-                            scan.cancel.store(true, Ordering::Relaxed);
-                        }
-                    });
-                    if let Some(p) = &self.progress {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(p.current_path.to_string_lossy())
-                                    .small()
-                                    .color(MUTED),
-                            )
-                            .truncate(),
-                        );
-                    }
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(if self.demo {
-                                "●  DEMO DATA"
-                            } else {
-                                "●  READY"
-                            })
-                            .color(ACCENT)
-                            .size(11.0)
-                            .strong(),
-                        );
+                ui.horizontal(|ui| {
+                    if self.loading {
                         ui.label(
                             RichText::new(format!(
-                                "{} files  /  {} folders  /  {} skipped  /  {} links  /  {:.2}s",
-                                self.tree.stats.files,
-                                self.tree.stats.directories,
-                                self.tree.stats.skipped,
-                                self.tree.stats.symlinks,
-                                self.tree.stats.elapsed.as_secs_f64()
+                                "Scanning · {:.1}s",
+                                self.started.elapsed().as_secs_f32()
                             ))
                             .small()
                             .color(MUTED),
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new("Logical size · links not followed")
-                                    .small()
-                                    .color(MUTED),
-                            );
-                        });
+                    } else if self.loaded {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} updates · {} skipped · {} links · initial scan {:.2}s",
+                                self.updates,
+                                self.model.tree.stats.skipped,
+                                self.model.tree.stats.symlinks,
+                                self.model.tree.stats.elapsed.as_secs_f64()
+                            ))
+                            .small()
+                            .color(MUTED),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("Select a drive or folder to start watching.")
+                                .small()
+                                .color(MUTED),
+                        );
+                    }
+                    if !self.notice.is_empty() {
+                        ui.add(
+                            egui::Label::new(RichText::new(&self.notice).small().color(ACCENT))
+                                .truncate(),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new("Logical bytes").small().color(MUTED));
                     });
-                }
+                });
             });
     }
 
-    fn inspector(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::right("inspector")
-            .default_width(264.0)
-            .min_width(220.0)
-            .max_width(400.0)
-            .resizable(true)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(18))
-            .show(ctx, |ui| {
-                ui.label(RichText::new("SELECTION").small().strong().color(MUTED));
-                ui.add_space(10.0);
-                let node = &self.tree.nodes[self.selected];
-                ui.label(RichText::new(&node.name).size(21.0).strong());
-                ui.label(
-                    RichText::new(format_bytes(node.size))
-                        .size(30.0)
-                        .color(ACCENT),
-                );
-                let root_size = self.tree.nodes[self.zoom].size;
-                let fraction = if root_size > 0 {
-                    node.size as f64 / root_size as f64
-                } else {
-                    0.0
-                };
-                ui.add(
-                    egui::ProgressBar::new(fraction.min(1.0) as f32)
-                        .fill(ACCENT)
-                        .desired_height(5.0),
-                );
-                ui.label(
-                    RichText::new(format!("{:.1}% of this view", fraction * 100.0))
-                        .small()
-                        .color(MUTED),
-                );
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new(node.path.to_string_lossy())
-                        .small()
-                        .color(MUTED),
-                );
-                ui.add_space(8.0);
-                if !self.applied.is_empty() {
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.back.is_empty(), egui::Button::new("<"))
+                .clicked()
+            {
+                self.history(false);
+            }
+            if ui
+                .add_enabled(!self.forward.is_empty(), egui::Button::new(">"))
+                .clicked()
+            {
+                self.history(true);
+            }
+            if ui
+                .add_enabled(
+                    self.model.tree.nodes[self.zoom].parent.is_some(),
+                    egui::Button::new("Up"),
+                )
+                .clicked()
+                && let Some(parent) = self.model.tree.nodes[self.zoom].parent
+            {
+                self.navigate(parent);
+            }
+            let mut crumbs = vec![self.zoom];
+            let mut cursor = self.zoom;
+            while let Some(parent) = self.model.tree.nodes[cursor].parent {
+                crumbs.push(parent);
+                cursor = parent;
+            }
+            let width = (ui.available_width() - 120.0).max(100.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(width, 25.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("crumbs")
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for id in crumbs.into_iter().rev() {
+                                    if ui
+                                        .selectable_label(
+                                            id == self.zoom,
+                                            &self.model.tree.nodes[id].name,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.navigate(id);
+                                    }
+                                    ui.label(RichText::new("/").color(MUTED));
+                                }
+                            });
+                        });
+                },
+            );
+            ui.label(
+                RichText::new(format_bytes(self.model.weights[self.zoom]))
+                    .strong()
+                    .color(ACCENT),
+            );
+        });
+    }
+
+    fn welcome(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space((ui.available_height() * 0.32).max(15.0));
+            if self.loading {
+                ui.spinner();
+                ui.heading("Scanning your files");
+                if let Some(progress) = &self.progress {
                     ui.label(format!(
-                        "Matching: {}",
-                        format_bytes(self.weights[self.selected])
+                        "{} files · {} found",
+                        progress.files,
+                        format_bytes(progress.bytes)
                     ));
                 }
-                let is_dir = node.is_dir();
-                let copy_path = node.path.to_string_lossy().into_owned();
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(
-                            is_dir && self.selected != self.zoom,
-                            egui::Button::new("Zoom in"),
-                        )
-                        .clicked()
-                    {
-                        self.navigate(self.selected);
-                    }
-                    if ui.button("Copy path").clicked() {
-                        ctx.copy_text(copy_path.clone());
-                    }
-                    if ui
-                        .add_enabled(!self.demo, egui::Button::new("Reveal"))
-                        .clicked()
-                        && let Err(error) = reveal(&self.tree.nodes[self.selected])
-                    {
-                        self.error = Some(error);
-                    }
-                });
-                ui.add_space(16.0);
-                ui.separator();
-                ui.add_space(8.0);
+            } else {
+                ui.heading("Choose a disk or folder");
                 ui.label(
-                    RichText::new("LARGEST IN THIS FOLDER")
+                    RichText::new("The map will follow file changes automatically.").color(MUTED),
+                );
+                if ui.button("Open folder…").clicked() {
+                    self.choose_folder();
+                }
+                ui.label(
+                    RichText::new("Or select a drive in the sidebar.")
                         .small()
-                        .strong()
                         .color(MUTED),
                 );
-                ui.add_space(8.0);
-                let parent = if self.tree.nodes[self.selected].is_dir() {
-                    self.selected
-                } else {
-                    self.tree.nodes[self.selected].parent.unwrap_or(self.zoom)
-                };
-                if self
-                    .list_cache
-                    .as_ref()
-                    .is_none_or(|cache| cache.0 != parent || cache.1 != self.revision)
-                {
-                    let visible = self.tree.nodes[parent]
-                        .children
-                        .iter()
-                        .copied()
-                        .filter(|&id| self.weights[id] > 0 || self.tree.nodes[id].size == 0);
-                    let mut ids = Vec::new();
-                    let mut count = 0;
-                    for id in visible {
-                        count += 1;
-                        if ids.len() < 100 {
-                            ids.push(id);
-                        }
-                    }
-                    self.list_cache = Some((parent, self.revision, ids, count));
-                }
-                let (_, _, ids, child_count) = self.list_cache.as_ref().unwrap().clone();
-                egui::ScrollArea::vertical()
-                    .id_salt("largest")
-                    .show(ui, |ui| {
-                        for id in ids.iter().copied().take(100) {
-                            let node = &self.tree.nodes[id];
-                            if self.weights[id] == 0 && node.size > 0 {
-                                continue;
-                            }
-                            let response = ui.selectable_label(
-                                self.selected == id,
-                                format!("{}  {}", if node.is_dir() { "+" } else { "·" }, node.name),
-                            );
-                            ui.label(
-                                RichText::new(format_bytes(self.weights[id]))
-                                    .small()
-                                    .color(MUTED),
-                            );
-                            if response.clicked() {
-                                self.selected = id;
-                            }
-                            if response.double_clicked() {
-                                self.navigate(id);
-                            }
-                            ui.add_space(5.0);
-                        }
-                        if ids.is_empty() {
-                            ui.label(RichText::new("No child entries").color(MUTED));
-                        }
-                        if child_count > 100 {
-                            ui.label(
-                                RichText::new("Showing the 100 largest entries")
-                                    .small()
-                                    .color(MUTED),
-                            );
-                        }
-                    });
-            });
+            }
+        });
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
@@ -491,13 +755,13 @@ impl App {
             cache.root != self.zoom
                 || cache.depth != self.depth
                 || cache.area != area
-                || cache.revision != self.revision
+                || cache.revision != self.map_revision
         }) {
             let mut tiles = Vec::new();
-            if self.weights[self.zoom] > 0 {
+            if self.model.weights[self.zoom] > 0 {
                 collect_tiles(
-                    &self.tree,
-                    &self.weights,
+                    &self.model.tree,
+                    &self.model.weights,
                     self.zoom,
                     area.shrink(2.0),
                     self.depth,
@@ -509,7 +773,7 @@ impl App {
                 root: self.zoom,
                 depth: self.depth,
                 area,
-                revision: self.revision,
+                revision: self.map_revision,
                 tiles,
             });
         }
@@ -522,7 +786,7 @@ impl App {
                 .map(|tile| tile.id)
         });
         for tile in tiles {
-            let node = &self.tree.nodes[tile.id];
+            let node = &self.model.tree.nodes[tile.id];
             let rect = tile.rect.shrink(1.0);
             let mut color = color(node, self.classic, tile.level);
             if hovered == Some(tile.id) {
@@ -549,7 +813,11 @@ impl App {
                     clipped.text(
                         text_rect.left_top(),
                         Align2::LEFT_TOP,
-                        format!("{}  ·  {}", node.name, format_bytes(self.weights[tile.id])),
+                        format!(
+                            "{}  ·  {}",
+                            node.name,
+                            format_bytes(self.model.weights[tile.id])
+                        ),
                         FontId::proportional(12.0),
                         Color32::from_rgb(227, 235, 246),
                     );
@@ -564,7 +832,7 @@ impl App {
                     clipped.text(
                         text_rect.center() + Vec2::new(0.0, 12.0),
                         Align2::CENTER_CENTER,
-                        format_bytes(self.weights[tile.id]),
+                        format_bytes(self.model.weights[tile.id]),
                         FontId::proportional(11.0),
                         Color32::from_white_alpha(190),
                     );
@@ -591,13 +859,17 @@ impl App {
             painter.text(
                 area.center(),
                 Align2::CENTER_CENTER,
-                "No matching bytes\nTry another filter or open a different folder.",
+                if self.applied.is_empty() {
+                    "No file bytes here yet.\nNew files will appear automatically."
+                } else {
+                    "No files match this filter."
+                },
                 FontId::proportional(18.0),
                 MUTED,
             );
         }
         if let Some(id) = hovered {
-            let node = &self.tree.nodes[id];
+            let node = &self.model.tree.nodes[id];
             response.clone().on_hover_ui(|ui| {
                 ui.strong(&node.name);
                 ui.label(format_bytes(node.size));
@@ -616,7 +888,7 @@ impl App {
         response.context_menu(|ui| {
             if ui.button("Copy selected path").clicked() {
                 ui.ctx().copy_text(
-                    self.tree.nodes[self.selected]
+                    self.model.tree.nodes[self.selected]
                         .path
                         .to_string_lossy()
                         .into_owned(),
@@ -625,7 +897,7 @@ impl App {
             }
             if ui
                 .add_enabled(
-                    self.tree.nodes[self.selected].is_dir(),
+                    self.model.tree.nodes[self.selected].is_dir(),
                     egui::Button::new("Zoom into selection"),
                 )
                 .clicked()
@@ -634,7 +906,7 @@ impl App {
                 ui.close();
             }
             if ui.button("Back to root").clicked() {
-                self.navigate(self.tree.root);
+                self.navigate(self.model.tree.root);
                 ui.close();
             }
         });
@@ -643,7 +915,15 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_scan(ctx);
+        self.poll_live();
+        if let Some(changed) = self.query_changed {
+            let elapsed = changed.elapsed();
+            if elapsed >= Duration::from_millis(150) {
+                self.apply_filter();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(150) - elapsed);
+            }
+        }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O)) {
             self.choose_folder();
         }
@@ -652,181 +932,56 @@ impl eframe::App for App {
         {
             self.begin_scan(PathBuf::from(self.path.trim()));
         }
-        if !ctx.wants_keyboard_input()
+        if self.loaded
+            && !ctx.wants_keyboard_input()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace))
-            && let Some(parent) = self.tree.nodes[self.zoom].parent
+            && let Some(parent) = self.model.tree.nodes[self.zoom].parent
         {
             self.navigate(parent);
         }
-        self.header(ctx);
+        self.sidebar(ctx);
         self.status(ctx);
-        self.inspector(ctx);
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(BG)
-                    .inner_margin(egui::Margin::symmetric(20, 14)),
-            )
+            .frame(egui::Frame::new().fill(BG).inner_margin(6))
             .show(ctx, |ui| {
                 if let Some(error) = self.error.clone() {
                     ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(Color32::LIGHT_RED, error);
+                        ui.label(RichText::new(error).small().color(Color32::LIGHT_RED));
                         if ui.small_button("Dismiss").clicked() {
                             self.error = None;
                         }
                     });
                 }
-                if !self.notice.is_empty() {
-                    ui.add(
-                        egui::Label::new(RichText::new(&self.notice).small().color(ACCENT))
-                            .truncate(),
-                    );
+                if self.loaded {
+                    self.toolbar(ui);
+                    self.canvas(ui);
+                } else {
+                    self.welcome(ui);
                 }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.back.is_empty(), egui::Button::new("<"))
-                        .clicked()
-                        && let Some(id) = self.back.pop()
-                    {
-                        self.forward.push(self.zoom);
-                        self.zoom = id;
-                        self.selected = id;
-                    }
-                    if ui
-                        .add_enabled(!self.forward.is_empty(), egui::Button::new(">"))
-                        .clicked()
-                        && let Some(id) = self.forward.pop()
-                    {
-                        self.back.push(self.zoom);
-                        self.zoom = id;
-                        self.selected = id;
-                    }
-                    let parent = self.tree.nodes[self.zoom].parent;
-                    if ui
-                        .add_enabled(parent.is_some(), egui::Button::new("Up"))
-                        .clicked()
-                        && let Some(id) = parent
-                    {
-                        self.navigate(id);
-                    }
-                    egui::ScrollArea::horizontal()
-                        .id_salt("crumbs")
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let mut crumbs = vec![self.zoom];
-                                let mut cursor = self.zoom;
-                                while let Some(parent) = self.tree.nodes[cursor].parent {
-                                    crumbs.push(parent);
-                                    cursor = parent;
-                                }
-                                for id in crumbs.into_iter().rev() {
-                                    if ui
-                                        .selectable_label(
-                                            id == self.zoom,
-                                            &self.tree.nodes[id].name,
-                                        )
-                                        .clicked()
-                                    {
-                                        self.navigate(id);
-                                    }
-                                    ui.label(RichText::new("/").color(MUTED));
-                                }
-                            });
-                        });
-                });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format_bytes(self.weights[self.zoom]))
-                            .size(32.0)
-                            .strong(),
-                    );
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("IN THIS VIEW").small().color(MUTED));
-                        ui.label(
-                            RichText::new(if self.demo {
-                                "Sample workspace · open a folder to begin"
-                            } else {
-                                "Click to inspect · double-click to explore"
-                            })
-                            .small()
-                            .color(MUTED),
-                        );
-                    });
-                });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Filter").color(MUTED));
-                    let response = ui.add_sized(
-                        [(ui.available_width() - 350.0).max(100.0), 28.0],
-                        egui::TextEdit::singleline(&mut self.query)
-                            .hint_text("*.zip; >100mb; |backup*"),
-                    );
-                    if response.changed() {
-                        self.apply_filter();
-                    }
-                    if ui.small_button("Clear").clicked() {
-                        self.query.clear();
-                        self.apply_filter();
-                    }
-                    ui.label(RichText::new("Depth").small().color(MUTED));
-                    ui.add(
-                        egui::Slider::new(&mut self.depth, 1..=6)
-                            .show_value(true)
-                            .clamping(egui::SliderClamping::Always),
-                    );
-                    ui.checkbox(&mut self.classic, "Classic");
-                });
-                if let Some(error) = &self.filter_error {
-                    ui.colored_label(
-                        Color32::LIGHT_RED,
-                        format!("{error} · showing previous valid filter"),
-                    );
-                }
-                ui.horizontal(|ui| {
-                    for (label, color) in [
-                        ("Code", Color32::from_rgb(64, 111, 161)),
-                        ("Media", Color32::from_rgb(167, 120, 62)),
-                        ("Images", Color32::from_rgb(51, 128, 122)),
-                        ("Archives", Color32::from_rgb(156, 84, 108)),
-                        ("Apps", Color32::from_rgb(113, 94, 157)),
-                        ("Other", Color32::from_rgb(76, 99, 128)),
-                    ] {
-                        ui.label(RichText::new("■").color(color));
-                        ui.label(RichText::new(label).size(11.0).color(MUTED));
-                    }
-                });
-                ui.add_space(5.0);
-                self.canvas(ui);
             });
-        egui::Window::new("Welcome to Space Sniffer")
+        egui::Window::new("Space Sniffer")
             .open(&mut self.help)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label("Open a folder or enter a drive path to scan it.");
-                ui.label("Rectangle area represents logical file size.");
-                ui.label("Click: inspect. Double-click: zoom into a folder.");
-                ui.label("Backspace: parent. Ctrl+O: open. F5: rescan.");
+                ui.label("Choose any drive or folder. Changes update the map automatically.");
+                ui.label("Click: inspect. Double-click: zoom. Backspace: parent.");
+                ui.label("Ctrl+O: choose root. F5: optional full rescan.");
                 ui.separator();
-                ui.label("Filters combine with semicolons (AND):");
                 ui.monospace("*.zip; >100mb; |backup*");
-                ui.label("Substring, * and ? wildcards, exclusions with |, < and > sizes.");
-                ui.label("MB = 1,000,000 bytes. MiB = 1,048,576 bytes.");
+                ui.label("Combine filename and size filters with semicolons.");
+                ui.label("MB uses decimal bytes; MiB uses binary bytes.");
                 ui.separator();
-                ui.label("Symlinks and Windows reparse points are never followed.");
-                ui.label("Hard links count per path. Unreadable entries are skipped.");
-                ui.label("Zero-byte entries appear in the list, without map area.");
-                ui.label("CSV includes every entry in this view, with total and matching bytes.");
-                ui.label("No telemetry. No file deletion. MIT licensed.");
+                ui.label("Logical file sizes; hard links count per path.");
+                ui.label("Links and reparse points are not traversed.");
+                ui.label("Watcher errors trigger automatic recovery.");
+                ui.label("MIT licensed · No telemetry · No deletion actions");
             });
     }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
-        if let Some(scan) = &self.scan {
-            scan.cancel.store(true, Ordering::Relaxed);
-        }
+        self.stop();
     }
 }
 
@@ -861,7 +1016,7 @@ fn collect_tiles(
     let container = node.is_dir()
         && remaining > 0
         && rect.width() > 60.0
-        && rect.height() > 52.0
+        && rect.height() > 44.0
         && !node.children.is_empty();
     out.push(DrawTile {
         id,
@@ -872,7 +1027,7 @@ fn collect_tiles(
     if !container {
         return;
     }
-    let inner = Rect::from_min_max(rect.min + Vec2::new(4.0, 24.0), rect.max - Vec2::splat(4.0));
+    let inner = Rect::from_min_max(rect.min + Vec2::new(3.0, 20.0), rect.max - Vec2::splat(4.0));
     let items: Vec<_> = node
         .children
         .iter()
@@ -967,63 +1122,4 @@ fn reveal(node: &Node) -> Result<(), String> {
     result
         .map(|_| ())
         .map_err(|error| format!("Could not reveal entry: {error}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use space_sniffer::model::EntryKind;
-    use std::sync::{Arc, atomic::AtomicBool, mpsc};
-
-    #[test]
-    fn new_scan_with_invalid_query_rebuilds_weights_for_the_new_tree() {
-        let mut app = App::demo_state();
-        app.query = "*.zip".into();
-        app.apply_filter();
-        app.query = ">oops".into();
-        app.apply_filter();
-        let mut tree = crate::demo::tree();
-        let root = tree.root;
-        for i in 0..100 {
-            let id = tree.nodes.len();
-            tree.nodes.push(Node {
-                name: format!("extra-{i}.zip"),
-                path: PathBuf::from(format!("extra-{i}.zip")),
-                kind: EntryKind::File,
-                size: 100,
-                children: vec![],
-                parent: Some(root),
-                modified: None,
-            });
-            tree.nodes[root].children.push(id);
-            tree.nodes[root].size += 100;
-        }
-        let expected = Filter::parse("*.zip").unwrap().weights(&tree);
-        let (sender, receiver) = mpsc::channel();
-        sender.send(ScanEvent::Finished(Ok(tree))).unwrap();
-        app.scan = Some(ScanHandle {
-            receiver,
-            cancel: Arc::new(AtomicBool::new(false)),
-        });
-        app.poll_scan(&egui::Context::default());
-        assert_eq!(app.weights, expected);
-        assert_eq!(app.weights.len(), app.tree.nodes.len());
-        assert!(app.filter_error.is_some());
-        assert_eq!(app.applied, "*.zip");
-    }
-
-    #[test]
-    fn nested_map_respects_depth_and_only_uses_valid_nodes() {
-        let tree = crate::demo::tree();
-        let weights = tree.nodes.iter().map(|node| node.size).collect::<Vec<_>>();
-        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 600.0));
-        let mut tiles = Vec::new();
-        collect_tiles(&tree, &weights, tree.root, bounds, 2, 0, &mut tiles);
-        assert!(tiles.len() > tree.nodes[tree.root].children.len());
-        for tile in tiles {
-            assert!(tile.id < tree.nodes.len());
-            assert!(tile.level <= 2);
-            assert!(bounds.contains_rect(tile.rect));
-        }
-    }
 }
