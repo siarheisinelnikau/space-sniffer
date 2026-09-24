@@ -1,9 +1,10 @@
 //! Filesystem scanning, filtering and treemap geometry for Space Sniffer.
 pub mod export;
 pub mod filter;
-pub mod model;
 pub mod live;
 pub mod live_tree;
+pub mod map_items;
+pub mod model;
 pub mod scanner;
 pub mod treemap;
 
