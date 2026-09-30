@@ -2,7 +2,9 @@
 
 [Русская версия](README.ru.md)
 
-A native disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Scan a folder or drive, find large files in a nested treemap, and explore the results without leaving the app.
+A native, live disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Choose any drive, folder, or accessible network path; the treemap updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
+
+[Download the latest release](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
 
 ![Space Sniffer showing a nested disk usage treemap](docs/screenshot.png)
 
@@ -10,12 +12,16 @@ This is an independent implementation inspired by [SpaceSniffer by Uderzo Softwa
 
 ## What works
 
-- Background scanning with progress, cancellation, and a responsive interface.
+- Parallel background scanning with progress and cancellation, using up to eight directory workers.
+- Automatic filesystem watching, incremental file updates, and recovery after missed events.
 - A squarified treemap with nested folders, file type colors, adjustable depth, and a Classic palette.
 - Folder zoom, breadcrumbs, back/forward navigation, and a selection inspector with the largest child entries.
 - Filename and size filters, path copying, and opening an entry in the system file manager.
 - CSV export of the current subtree, with original and filtered byte counts.
-- A command-line scan summary and synthetic demo data when launched without a path.
+- Drive shortcuts, a root path field, and an empty start screen until you choose a location.
+- A command-line scan summary without opening a window.
+
+On a generated 20,000-file Windows fixture with warm metadata, the scanner improved from **292.89 ms to 10.61 ms** versus the previous serial implementation. This measures traversal, metadata, and sorting in an optimized standalone harness; it is not a whole-drive or cold-cache guarantee. See [methodology and results](docs/performance.md).
 
 Scanning reads filesystem metadata. The app has no file deletion feature or telemetry. Export writes only the report you choose to save.
 
@@ -37,7 +43,7 @@ cargo run --locked --release -- "C:\Users"
 cargo run --locked --release -- --scan "C:\Users"
 ```
 
-The first command opens the demo. The second opens the app and scans that path. `--scan PATH` prints totals and up to 20 of the root's largest children without opening a window. A regular file is also a valid scan root.
+The first command opens the root chooser. The second opens the app, scans that path, and watches for changes. `--scan PATH` prints totals and up to 20 of the root's largest children without opening a window or starting a watcher. A regular file is also a valid scan root.
 
 To build the executable without launching it:
 
@@ -73,7 +79,9 @@ The release workflow packages a Windows x86-64 ZIP, a Linux x86-64 GNU tarball, 
 
 ## Explore a scan
 
-Choose **Open folder**, enter a path and press Enter, or pass a path on the command line. During a scan, the previous view stays available until a complete result replaces it. Cancelling retains that view.
+Choose a drive shortcut or **Open folder**, enter any accessible path and press **Watch root** or Enter, or pass a path on the command line. No location is scanned until you choose one. The initial scan builds the map; subsequent file creation, writes, renames, and deletion update it automatically. **Stop** cancels the current scan or stops watching. A completed current view remains available when watching stops.
+
+The left sidebar contains root selection, watcher status, filters, depth, colors, selection details, and export. **LIVE** indicates an active native watcher; status messages explain recovery or fallback behavior. The map is cached between relevant changes, and an idle watcher does not continuously redraw the window.
 
 | Control | Action |
 | --- | --- |
@@ -81,7 +89,7 @@ Choose **Open folder**, enter a path and press Enter, or pass a path on the comm
 | Double-click a folder | Zoom into it |
 | Breadcrumbs, back/forward arrows | Navigate the scan |
 | `Ctrl+O` | Choose a folder |
-| `F5` | Scan the path currently in the path field |
+| `F5` | Optional full rescan of the root path |
 | `Backspace` | Go to the parent folder when not editing text |
 | **Depth** | Show 1–6 nested levels |
 | **Classic** | Switch the treemap palette |
@@ -113,12 +121,13 @@ Filters apply to file basenames, ignoring case. Plain text matches a substring; 
 - Hard links count separately for every path; their shared storage is not deduplicated.
 - Symbolic links and Windows reparse points, including junctions, are not traversed and contribute zero bytes. Selecting a link as the scan root produces an error.
 - Unreadable or disappearing descendants are skipped and counted. An unreadable root produces an error. A scan can therefore be partial; it does not bypass permissions.
-- Each scan uses one worker thread. Parallel subscans and a live filesystem watcher are not implemented. Use `F5` after files change; a scan is not an atomic filesystem snapshot.
+- Initial scans use bounded parallel directory traversal, with up to eight workers. Windows reuses metadata returned by directory enumeration. Storage and tree shape affect performance; parallel access can be slower on a hard drive.
+- Watching is event driven. Unsupported filesystems, network shares, permissions, and event overflow can affect notification delivery. If native watching fails, the sidebar reports fallback mode: full snapshots are checked every two seconds, with native watching retried every five seconds. This fallback can cost more on large roots. A scan is not an atomic filesystem snapshot.
 - The full scan is held in memory. Very large trees can take time to scan, filter, and draw. Cancellation is cooperative and cannot interrupt an operating system call already in progress.
 
 ## Contributing and license
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and manual verification, and [docs/architecture.md](docs/architecture.md) for the module layout.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and manual verification, [docs/architecture.md](docs/architecture.md) for the module layout, and [docs/performance.md](docs/performance.md) for scanner benchmarks.
 
 ```sh
 cargo fmt --all -- --check
