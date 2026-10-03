@@ -31,6 +31,9 @@ impl Directory {
             timestamp.as_nanos()
         ));
         fs::create_dir(&path).unwrap();
+        // FSEvents reports canonical paths; /var is an alias for /private/var.
+        #[cfg(target_os = "macos")]
+        let path = path.canonicalize().unwrap();
         Self(path)
     }
 

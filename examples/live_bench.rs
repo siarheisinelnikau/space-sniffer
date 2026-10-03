@@ -93,6 +93,8 @@ impl BenchDirectory {
             timestamp.as_nanos()
         ));
         fs::create_dir(&path).unwrap();
+        #[cfg(target_os = "macos")]
+        let path = path.canonicalize().unwrap();
         Self(path)
     }
 }
