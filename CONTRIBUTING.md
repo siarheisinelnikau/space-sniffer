@@ -49,6 +49,6 @@ Keep pull requests focused. Describe the user-visible behavior, why it changed, 
 
 The release workflow runs on pushed tags matching `v*`, for example `v0.2.0`. Before tagging, update `Cargo.toml` and `Cargo.lock` together when changing the package version, run the checks above, and verify a real GUI scan on the supported local platform.
 
-The workflow builds native release binaries on Windows, Ubuntu 22.04, and macOS 14, packages the executable and documentation, and uploads the archives as workflow artifacts. Once every build succeeds, GitHub CLI creates the GitHub release and attaches the archives and `SHA256SUMS`. A rerun updates assets on an existing release. The workflow does not sign executables or produce installers or macOS app bundles.
+The workflow builds native release binaries on Windows, Ubuntu 22.04, and macOS 15, packages the executable and documentation, and uploads the archives as workflow artifacts. Once every build succeeds, GitHub CLI creates the GitHub release and attaches the archives and `SHA256SUMS`. A rerun updates assets on an existing release. The workflow does not sign executables or produce installers or macOS app bundles.
 
 Contributions are distributed under the [MIT license](LICENSE).
