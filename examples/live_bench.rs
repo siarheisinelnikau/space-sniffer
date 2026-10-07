@@ -153,6 +153,7 @@ impl NativeSession {
                 }
                 Ok(LiveEvent::Status { watching, .. }) => self.watching = watching,
                 Ok(LiveEvent::Progress(_)) => {}
+                Ok(LiveEvent::Preview { .. }) => {}
                 Ok(LiveEvent::Failed(message)) => panic!("live scan failed: {message}"),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(error) => panic!("native watcher disconnected: {error}"),
