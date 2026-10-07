@@ -3,7 +3,7 @@
 
 use crate::{
     live_tree::{LiveTree, path_key},
-    model::{EntryKind, ScanTree},
+    model::{EntryKind, Node, ScanTree},
     scanner::{self, ScanProgress},
 };
 use notify::{
@@ -32,6 +32,7 @@ const WATCH_RETRY: Duration = Duration::from_secs(5);
 const RAW_CAPACITY: usize = 1024;
 const OUTPUT_CAPACITY: usize = 8;
 const MAX_PENDING: usize = 4096;
+const PREVIEW_CHUNK: usize = 8192;
 
 #[derive(Clone, Debug)]
 pub enum Change {
@@ -51,9 +52,18 @@ pub enum Change {
 #[derive(Debug)]
 pub enum LiveEvent {
     Progress(ScanProgress),
+    /// A bounded, contiguous prefix of the first scan. The root is sent alone
+    /// at start=0. Directory sizes/children are rebuilt by the receiving model.
+    Preview {
+        start: usize,
+        nodes: Vec<Node>,
+    },
     Ready(Box<LiveTree>),
     Changes(Vec<Change>),
-    Status { watching: bool, message: String },
+    Status {
+        watching: bool,
+        message: String,
+    },
     Failed(String),
 }
 
@@ -130,6 +140,54 @@ impl Sink {
             Ok(()) => (self.wake)(),
             Err(TrySendError::Disconnected(_)) => self.cancel.store(true, Ordering::Relaxed),
             Err(TrySendError::Full(_)) => (self.wake)(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct PreviewPublisher {
+    next: usize,
+}
+
+impl PreviewPublisher {
+    fn publish(&mut self, tree: &ScanTree, sink: &Sink) {
+        if self.next >= tree.nodes.len() || sink.cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let end = if self.next == 0 {
+            1
+        } else {
+            (self.next + PREVIEW_CHUNK).min(tree.nodes.len())
+        };
+        // Copy each delivered node only once, never its growing child list.
+        // Slow/hidden UIs may lag; the authoritative Ready event supersedes
+        // any remaining prefix. A full queue never stalls filesystem workers.
+        let nodes = tree.nodes[self.next..end]
+            .iter()
+            .map(|node| Node {
+                name: node.name.clone(),
+                path: node.path.clone(),
+                kind: node.kind,
+                size: if node.kind == EntryKind::File {
+                    node.size
+                } else {
+                    0
+                },
+                children: Vec::new(),
+                parent: node.parent,
+                modified: node.modified,
+            })
+            .collect();
+        match sink.sender.try_send(LiveEvent::Preview {
+            start: self.next,
+            nodes,
+        }) {
+            Ok(()) => {
+                self.next = end;
+                (sink.wake)();
+            }
+            Err(TrySendError::Full(_)) => (sink.wake)(),
+            Err(TrySendError::Disconnected(_)) => sink.cancel.store(true, Ordering::Relaxed),
         }
     }
 }
@@ -475,9 +533,18 @@ impl Worker {
         }
         self.last_poll = Instant::now();
         let sink = self.sink.clone();
-        let result = scanner::scan_with_progress(&self.root, &self.sink.cancel, |progress| {
+        let report = |progress| {
             sink.try_event(LiveEvent::Progress(progress));
-        });
+        };
+        let result = if self.initialized {
+            scanner::scan_with_progress(&self.root, &self.sink.cancel, report)
+        } else {
+            self.status(false, "Scanning · the map fills as files are found".into());
+            let mut previews = PreviewPublisher::default();
+            scanner::scan_with_observer(&self.root, &self.sink.cancel, report, |tree| {
+                previews.publish(tree, &sink);
+            })
+        };
         match result {
             Ok(tree) => {
                 self.root_present = true;
@@ -943,6 +1010,93 @@ mod tests {
         };
         drop(handle);
         assert!(cancel.load(Ordering::Relaxed));
+    }
+
+    fn preview_tree(files: usize) -> ScanTree {
+        let root = std::path::absolute("publisher-test").unwrap();
+        let mut nodes = vec![Node {
+            name: "publisher-test".into(),
+            path: root.clone(),
+            kind: EntryKind::Directory,
+            size: files as u64,
+            children: (1..=files).collect(),
+            parent: None,
+            modified: None,
+        }];
+        for i in 0..files {
+            nodes.push(Node {
+                name: format!("{i}.bin"),
+                path: root.join(format!("{i}.bin")),
+                kind: EntryKind::File,
+                size: 1,
+                children: vec![],
+                parent: Some(0),
+                modified: None,
+            });
+        }
+        ScanTree {
+            nodes,
+            root: 0,
+            stats: crate::model::ScanStats {
+                files: files as u64,
+                directories: 1,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn previews_are_bounded_dense_and_never_copy_growing_child_lists() {
+        let tree = preview_tree(PREVIEW_CHUNK + 3);
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let sink = Sink {
+            sender,
+            cancel: Arc::new(AtomicBool::new(false)),
+            wake: Arc::new(|| {}),
+        };
+        let mut publisher = PreviewPublisher::default();
+        let mut next = 0;
+        for _ in 0..4 {
+            publisher.publish(&tree, &sink);
+            if let Ok(LiveEvent::Preview { start, nodes }) = receiver.try_recv() {
+                assert_eq!(start, next);
+                assert!(nodes.len() <= PREVIEW_CHUNK);
+                assert!(nodes.iter().all(|node| node.children.is_empty()));
+                if start == 0 {
+                    assert_eq!(nodes.len(), 1);
+                    assert_eq!(nodes[0].size, 0);
+                } else {
+                    assert!(nodes.iter().all(|node| node.size == 1));
+                }
+                next += nodes.len();
+            }
+        }
+        assert_eq!(next, tree.nodes.len());
+        assert_eq!(publisher.next, next);
+    }
+
+    #[test]
+    fn full_preview_queue_never_blocks_or_advances_the_prefix() {
+        let tree = preview_tree(2);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(LiveEvent::Failed("occupied".into())).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sink = Sink {
+            sender,
+            cancel: Arc::clone(&cancel),
+            wake: Arc::new(|| {}),
+        };
+        let mut publisher = PreviewPublisher::default();
+        publisher.publish(&tree, &sink);
+        assert_eq!(publisher.next, 0);
+        let _ = receiver.recv().unwrap();
+        publisher.publish(&tree, &sink);
+        assert_eq!(publisher.next, 1);
+        let _ = receiver.recv().unwrap();
+        drop(receiver);
+        publisher.publish(&tree, &sink);
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(publisher.next, 1);
     }
 
     #[cfg(unix)]
