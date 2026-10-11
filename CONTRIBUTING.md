@@ -33,6 +33,10 @@ For interface changes, check the empty startup screen and a real scan. Verify ar
 
 For scanner changes, check cancellation, unreadable entries, zero-byte files, and directory totals. Preserve the existing treatment of logical sizes, hard links, symbolic links, and Windows reparse points unless the change explicitly revises that contract and its documentation.
 
+For progressive-scan changes, verify the root seed and first nonempty batch arrive before final completion. Preview chunks must contain at most 8,192 new nodes, form a contiguous nonrepeating arena prefix, and preserve parent-before-child IDs. A full output queue must not block directory traversal or advance the publication cursor. No repeated whole-tree cloning or rebuilding of the existing path index is allowed. Check observer thread affinity, cancellation after an observer callback, and long final sorting.
+
+While a large first scan is running, inspect, zoom, and filter the partial map. Check discovered counts and discovery-order entries, Stop retaining a marked partial map, CSV staying disabled, and final completion automatically installing the full sorted model while preserving valid selection/zoom/filter. Native changes must start after the final model is installed. The [preview benchmark](examples/preview_bench.rs) distinguishes initial drawable geometry from final model readiness; neither measures actual operating-system window painting.
+
 For filter or export changes, verify a combined query such as `*.zip; >100MB; |backup*`, invalid input retaining the previous filter, and an exported subtree containing both original and visible byte counts. CSV must keep its quoting and spreadsheet formula protections.
 
 Compare one scanner worker with multiple workers on flat, broad, and deep trees. Progress callbacks must stay on the coordinator thread, queues must remain bounded, and cancellation must release workers blocked by backpressure. The [scanner benchmark](examples/scan_bench.rs) and [performance notes](docs/performance.md) describe reproducible runs. State cache conditions and storage type: creating a fixture does not produce a cold cache, and parallel access is not always faster on a hard drive.
@@ -47,7 +51,7 @@ Keep pull requests focused. Describe the user-visible behavior, why it changed, 
 
 ## Releases
 
-The release workflow runs on pushed tags matching `v*`, for example `v0.2.0`. Before tagging, update `Cargo.toml` and `Cargo.lock` together when changing the package version, run the checks above, and verify a real GUI scan on the supported local platform.
+The release workflow runs on pushed tags matching `v*`, for example `v0.3.0`. Before tagging, update `Cargo.toml` and `Cargo.lock` together when changing the package version, run the checks above, and verify a real GUI scan on the supported local platform.
 
 The workflow builds native release binaries on Windows, Ubuntu 22.04, and macOS 15, packages the executable and documentation, and uploads the archives as workflow artifacts. Once every build succeeds, GitHub CLI creates the GitHub release and attaches the archives and `SHA256SUMS`. A rerun updates assets on an existing release. The workflow does not sign executables or produce installers or macOS app bundles.
 

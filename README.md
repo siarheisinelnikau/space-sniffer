@@ -2,7 +2,7 @@
 
 [Русская версия](README.ru.md)
 
-A native, live disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Choose any drive, folder, or accessible network path; the treemap updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
+A native, live disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
 
 [Download the latest release](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
 
@@ -13,6 +13,7 @@ This is an independent implementation inspired by [SpaceSniffer by Uderzo Softwa
 ## What works
 
 - Parallel background scanning with progress and cancellation, using up to eight directory workers.
+- A growing, interactive map during the first scan, without waiting for the whole drive to finish.
 - Automatic filesystem watching, incremental file updates, and recovery after missed events.
 - A squarified treemap with nested folders, file type colors, adjustable depth, and a Classic palette.
 - Folder zoom, breadcrumbs, back/forward navigation, and a selection inspector with the largest child entries.
@@ -79,7 +80,11 @@ The release workflow packages a Windows x86-64 ZIP, a Linux x86-64 GNU tarball, 
 
 ## Explore a scan
 
-Choose a drive shortcut or **Open folder**, enter any accessible path and press **Watch root** or Enter, or pass a path on the command line. No location is scanned until you choose one. The initial scan builds the map; subsequent file creation, writes, renames, and deletion update it automatically. **Stop** cancels the current scan or stops watching. A completed current view remains available when watching stops.
+Choose a drive shortcut or **Open folder**, enter any accessible path and press **Watch root** or Enter, or pass a path on the command line. No location is scanned until you choose one. The root appears first and the map grows as entries arrive, so you can inspect, zoom, and filter during the scan. Subsequent file creation, writes, renames, and deletion update the completed map automatically.
+
+During scanning, **Discovered so far** counts only data already shown on the map. It can lag the scanner while the interface is busy; it is not a final disk total. The sidebar group is **Discovered entries**, in discovery order. Completion automatically replaces this preview with the full sorted result, retaining the filter and restoring selection/zoom where their paths still exist.
+
+**Stop** cancels scanning or watching and keeps the current map. A stopped initial scan remains explicitly marked **Partial map**. **Export CSV** becomes available after the initial scan completes, so a preview cannot be mistaken for a full report. Restart the root or use an optional full rescan to finish a stopped scan.
 
 The left sidebar contains root selection, watcher status, filters, depth, colors, selection details, and export. **LIVE** indicates an active native watcher; status messages explain recovery or fallback behavior. The map is cached between relevant changes, and an idle watcher does not continuously redraw the window.
 
@@ -95,7 +100,7 @@ The left sidebar contains root selection, watcher status, filters, depth, colors
 | **Classic** | Switch the treemap palette |
 | **Copy path** / **Reveal** | Copy the selection's path / open the system file manager |
 
-Zero-byte entries are available in the list but have no treemap area. The inspector lists up to 100 of a folder's largest children.
+Zero-byte entries are available in the list but have no treemap area. During scanning, the inspector lists up to 100 discovered children; after completion it lists up to 100 of the largest children.
 
 ## Filters
 
