@@ -47,7 +47,7 @@ For live-update changes, verify totals, matching weights, file/directory/link co
 
 Include your operating system, Rust version, reproduction steps, expected result, and actual result. For scan issues, describe the directory structure and relevant permissions or link types. Share a minimal example rather than a report containing private paths.
 
-Keep pull requests focused. Describe the user-visible behavior, why it changed, and the checks performed. Update both READMEs when changing controls, filter syntax, installation steps, or size semantics. [Architecture notes](docs/architecture.md) explain the module boundaries.
+Keep pull requests focused. Describe the user-visible behavior, why it changed, and the checks performed. Keep the interface and documentation in English. Update the README when changing controls, filter syntax, installation steps, or size semantics. [Architecture notes](docs/architecture.md) explain the module boundaries.
 
 ## Releases
 
