@@ -1,12 +1,12 @@
 # Space Sniffer
 
-[Русская версия](README.ru.md)
-
 A native, live disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
 
 [Download the latest release](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
 
-![Space Sniffer showing a nested disk usage treemap](docs/screenshot.png)
+![Space Sniffer on Windows: compact sidebar and live nested disk usage map](docs/screenshot.png)
+
+The app watching a real project folder on Windows.
 
 This is an independent implementation inspired by [SpaceSniffer by Uderzo Software](https://www.uderzo.it/main_products/space_sniffer/). It is not affiliated with Uderzo Software and does not use the original application's source code or assets.
 
