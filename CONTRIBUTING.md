@@ -53,6 +53,6 @@ Keep pull requests focused. Describe the user-visible behavior, why it changed, 
 
 The release workflow runs on pushed tags matching `v*`, for example `v0.3.0`. Before tagging, update `Cargo.toml` and `Cargo.lock` together when changing the package version, run the checks above, and verify a real GUI scan on the supported local platform.
 
-The workflow builds native release binaries on Windows, Ubuntu 22.04, and macOS 15, packages the executable and documentation, and uploads the archives as workflow artifacts. Once every build succeeds, GitHub CLI creates the GitHub release and attaches the archives and `SHA256SUMS`. A rerun updates assets on an existing release. The workflow does not sign executables or produce installers or macOS app bundles.
+CI checks Windows, Ubuntu 22.04, and macOS 15. The release workflow tests and builds Windows x86-64, then publishes only `space-sniffer.exe`, with no archive, installer, or extra release assets. After verifying the uploaded asset, it removes older GitHub release entries and assets; Git tags and commit history are retained. A rerun updates the executable on the existing release. Executables are not signed.
 
 Contributions are distributed under the [MIT license](LICENSE).
