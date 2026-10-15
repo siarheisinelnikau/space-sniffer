@@ -50,7 +50,7 @@ pub struct App {
     updates: u64,
     drives: Vec<PathBuf>,
     map_cache: Option<MapCache>,
-    list_cache: Option<(usize, u64, Vec<usize>, usize)>,
+    list_cache: Option<ChildList>,
 }
 
 impl App {
@@ -171,6 +171,9 @@ impl App {
     fn stop(&mut self) {
         if let Some(live) = self.live.take() {
             live.cancel.store(true, Ordering::Relaxed);
+            // A queued Ready may own millions of paths. Releasing its receiver
+            // must not destroy that model while handling a click or key press.
+            drop_in_background(live);
         }
         self.loading = false;
         self.watching = false;
@@ -231,7 +234,7 @@ impl App {
                 model.tree.nodes[model.tree.root].path.clone(),
             )
         };
-        self.model = model;
+        self.replace_model(model);
         // The worker already built unfiltered weights. Avoid traversing the
         // whole tree on the UI thread for the common empty-filter case.
         if !self.applied.is_empty() {
@@ -274,11 +277,11 @@ impl App {
                 symlinks: u64::from(root.kind == EntryKind::Symlink),
                 ..Default::default()
             };
-            self.model = LiveTree::new(ScanTree {
+            self.replace_model(LiveTree::new(ScanTree {
                 nodes: vec![root],
                 root: 0,
                 stats,
-            });
+            }));
             if !self.applied.is_empty() {
                 let _ = self.model.set_filter(&self.applied);
             }
@@ -333,6 +336,13 @@ impl App {
             if affects_view || self.model.tree.nodes[self.zoom].path != zoom {
                 self.map_revision = self.map_revision.wrapping_add(1);
             }
+        }
+    }
+
+    fn replace_model(&mut self, model: LiveTree) {
+        let previous = std::mem::replace(&mut self.model, model);
+        if previous.tree.nodes.len() > 16_384 {
+            drop_in_background(previous);
         }
     }
 
@@ -680,32 +690,12 @@ impl App {
                 .parent
                 .unwrap_or(self.zoom)
         };
-        if self
-            .list_cache
-            .as_ref()
-            .is_none_or(|cache| cache.0 != parent || cache.1 != self.revision)
-        {
-            let visible = self.model.tree.nodes[parent]
-                .children
-                .iter()
-                .copied()
-                .filter(|&id| self.model.weights[id] > 0 || self.model.tree.nodes[id].size == 0);
-            let mut ids = Vec::new();
-            let mut count = 0;
-            for id in visible {
-                count += 1;
-                if ids.len() < 100 {
-                    ids.push(id);
-                }
-            }
-            self.list_cache = Some((parent, self.revision, ids, count));
-        }
-        let (_, _, ids, count) = self.list_cache.as_ref().unwrap().clone();
+        let (ids, has_more, complete) = self.child_list(parent);
         egui::ScrollArea::vertical()
             .id_salt("largest")
             .max_height(210.0)
             .show(ui, |ui| {
-                for id in ids {
+                for &id in &ids {
                     let node = &self.model.tree.nodes[id];
                     let label = format!("{}  {}", if node.is_dir() { "+" } else { "·" }, node.name);
                     let response =
@@ -722,9 +712,11 @@ impl App {
                         self.navigate(id);
                     }
                 }
-                if count == 0 {
+                if !complete {
+                    ui.small("Finding matching entries…");
+                } else if ids.is_empty() {
                     ui.small("No entries");
-                } else if count > 100 {
+                } else if has_more {
                     ui.small(if self.partial {
                         "Showing the first 100 discovered entries"
                     } else {
@@ -732,6 +724,51 @@ impl App {
                     });
                 }
             });
+    }
+
+    fn child_list(&mut self, parent: usize) -> (Vec<usize>, bool, bool) {
+        if self
+            .list_cache
+            .as_ref()
+            .is_none_or(|cache| cache.parent != parent || cache.revision != self.revision)
+        {
+            self.list_cache = Some(ChildList {
+                parent,
+                revision: self.revision,
+                ids: Vec::with_capacity(100),
+                cursor: 0,
+                has_more: false,
+                complete: false,
+            });
+        }
+        let cache = self.list_cache.as_mut().unwrap();
+        let children = &self.model.tree.nodes[parent].children;
+        // Only 100 rows are displayed. Unfiltered folders need no full child
+        // walk; sparse filtered lists advance in bounded slices over frames.
+        if !cache.complete && self.applied.is_empty() {
+            cache.ids.extend(children.iter().take(100).copied());
+            cache.has_more = children.len() > 100;
+            cache.complete = true;
+        } else if !cache.complete {
+            let end = (cache.cursor + 4096).min(children.len());
+            while cache.cursor < end {
+                let id = children[cache.cursor];
+                cache.cursor += 1;
+                if self.model.weights[id] > 0 || self.model.tree.nodes[id].size == 0 {
+                    if cache.ids.len() == 100 {
+                        cache.has_more = true;
+                        cache.complete = true;
+                        break;
+                    }
+                    cache.ids.push(id);
+                }
+            }
+            cache.complete |= cache.cursor == children.len();
+            if !cache.complete {
+                self.ctx.request_repaint();
+            }
+        }
+        (cache.ids.clone(), cache.has_more, cache.complete)
     }
 
     fn status(&self, ctx: &egui::Context) {
@@ -1150,6 +1187,21 @@ struct MapCache {
     tiles: Vec<DrawTile>,
 }
 
+struct ChildList {
+    parent: usize,
+    revision: u64,
+    ids: Vec<usize>,
+    cursor: usize,
+    has_more: bool,
+    complete: bool,
+}
+
+fn drop_in_background(value: impl Send + 'static) {
+    let _ = std::thread::Builder::new()
+        .name("retire-map".into())
+        .spawn(move || drop(value));
+}
+
 fn collect_tiles(
     tree: &ScanTree,
     weights: &[u64],
@@ -1291,6 +1343,55 @@ fn reveal(node: &Node) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// In-memory UI work only: no filesystem I/O, window, GPU, or OS paint.
+    /// Run with `cargo test --release --bin space-sniffer profile_million -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual million-entry UI benchmark"]
+    fn profile_million_entry_frames() {
+        let ctx = egui::Context::default();
+        let mut app = App::empty(ctx.clone());
+        let source = tree(1_000_000);
+        let started = Instant::now();
+        let model = LiveTree::new(source);
+        println!(
+            "million-node model: {:.3} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        app.install_model(model);
+        let render = |app: &mut App| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 760.0))),
+                ..Default::default()
+            };
+            let started = Instant::now();
+            let _ = ctx.run(input, |ctx| {
+                app.sidebar(ctx);
+                app.status(ctx);
+                egui::CentralPanel::default().show(ctx, |ui| app.canvas(ui));
+            });
+            started.elapsed().as_secs_f64() * 1000.0
+        };
+        let mut rebuilt = Vec::new();
+        let mut cached = Vec::new();
+        for _ in 0..21 {
+            app.invalidate();
+            rebuilt.push(render(&mut app));
+            cached.push(render(&mut app));
+        }
+        rebuilt.sort_by(f64::total_cmp);
+        cached.sort_by(f64::total_cmp);
+        println!(
+            "million-node egui frame rebuilt: median {:.3} ms, p95 {:.3} ms; cached: median {:.3} ms, p95 {:.3} ms",
+            rebuilt[10], rebuilt[19], cached[10], cached[19]
+        );
+        let started = Instant::now();
+        app.install_model(LiveTree::new(tree(0)));
+        println!(
+            "replace million-node model on UI: {:.3} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
     fn tree(extra: usize) -> ScanTree {
         let root = std::path::absolute("test-root").unwrap();
         let nodes = vec![
@@ -1366,6 +1467,28 @@ mod tests {
         assert!(app.live.is_none());
         assert!(app.path.is_empty());
         assert_eq!(app.model.tree.total_size(), 0);
+    }
+
+    #[test]
+    fn child_list_stops_after_displayed_rows_and_slices_sparse_filters() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(20_000)));
+        let (ids, more, complete) = app.child_list(0);
+        assert_eq!(ids.len(), 100);
+        assert!(more && complete);
+        assert_eq!(app.list_cache.as_ref().unwrap().cursor, 0);
+
+        app.query = "absent-pattern".into();
+        app.apply_filter();
+        let (ids, more, complete) = app.child_list(0);
+        assert!(ids.is_empty());
+        assert!(!more && !complete);
+        assert_eq!(app.list_cache.as_ref().unwrap().cursor, 4096);
+        for _ in 0..5 {
+            app.child_list(0);
+        }
+        assert!(app.list_cache.as_ref().unwrap().complete);
+        assert!(app.list_cache.as_ref().unwrap().ids.is_empty());
     }
 
     #[test]
