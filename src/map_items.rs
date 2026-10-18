@@ -16,6 +16,8 @@ pub struct MapItems {
 /// Zero-weight and invalid child indices are ignored. The rectangle limit
 /// includes the collapsed tile. With a zero limit, all bytes and entry counts
 /// are available in the collapsed fields, but `items` is empty.
+/// Output is sorted by descending weight and then ascending ID, ready for the
+/// treemap's linear path without another sort.
 ///
 /// Children smaller than four square pixels, or a quarter of an average tile
 /// at the requested limit, are collapsed before touching the bounded heap.
@@ -28,26 +30,60 @@ pub fn visible_items(
     limit: usize,
 ) -> MapItems {
     let mut total = 0_u64;
-    let mut count = 0;
     for &id in children {
         let weight = weights.get(id).copied().unwrap_or(0);
-        if weight != 0 {
-            count += 1;
-            total = total.saturating_add(weight);
-        }
+        total = total.saturating_add(weight);
     }
-    if count == 0 {
+    if total == 0 {
         return MapItems::default();
     }
-    if limit == 0 || !pixel_area.is_finite() || pixel_area <= 0.0 {
-        return collapsed(count, total, limit != 0);
+    visible_items_with_total(children, weights, total, pixel_area, limit)
+}
+
+/// Select visible children in one pass when the parent's visible byte count is
+/// already known. `total` should be the saturating sum of the child weights,
+/// including the active filter. It is used only for the pixel cutoff: omitted
+/// counts and bytes are always calculated from the actual children, including
+/// when their total saturates at `u64::MAX`.
+///
+/// This avoids re-summing a million siblings each time a preview invalidates
+/// the map. At most `limit` output rectangles and heap entries are allocated.
+pub fn visible_items_with_total(
+    children: &[usize],
+    weights: &[u64],
+    total: u64,
+    pixel_area: f32,
+    limit: usize,
+) -> MapItems {
+    if total == 0 {
+        return MapItems::default();
+    }
+    let drawable = limit != 0 && pixel_area.is_finite() && pixel_area > 0.0;
+    if !drawable {
+        let mut count = 0;
+        let mut bytes = 0_u64;
+        for &id in children {
+            let weight = weights.get(id).copied().unwrap_or(0);
+            if weight != 0 {
+                count += 1;
+                bytes = bytes.saturating_add(weight);
+            }
+        }
+        return if count == 0 {
+            MapItems::default()
+        } else {
+            collapsed(count, bytes, limit != 0)
+        };
     }
 
-    let pixel_area = f64::from(pixel_area);
-    let minimum_area = 4.0_f64.max(pixel_area / (limit as f64 * 4.0));
+    // Move the floating-point work out of the sibling loop. The adaptive
+    // cutoff allows roughly four times the rectangle budget to reach the heap;
+    // all smaller entries only need an integer load/add and one comparison.
+    let minimum_weight =
+        (4.0 / f64::from(pixel_area)).max(1.0 / (limit as f64 * 4.0)) * total as f64;
     // The smallest retained weight (and largest ID for ties) is at the top.
-    let mut largest: BinaryHeap<Reverse<(u64, Reverse<usize>)>> =
-        BinaryHeap::with_capacity(limit.min(count));
+    let mut largest: BinaryHeap<Reverse<(u64, Reverse<usize>)>> = BinaryHeap::new();
+    let mut count = 0;
     let mut collapsed_bytes = 0_u64;
 
     for &id in children {
@@ -55,13 +91,20 @@ pub fn visible_items(
         if weight == 0 {
             continue;
         }
-        let area = weight as f64 / total as f64 * pixel_area;
-        if area < minimum_area {
+        count += 1;
+        if (weight as f64) < minimum_weight {
             collapsed_bytes = collapsed_bytes.saturating_add(weight);
             continue;
         }
 
         let candidate = (weight, Reverse(id));
+        if largest.capacity() == 0 {
+            // Allocate only if something survives LOD. Small drawable groups
+            // need one allocation instead of repeated heap growth; huge all-
+            // tiny groups need none. Cap speculative allocation for callers
+            // requesting an unusually large rectangle budget.
+            largest.reserve_exact(limit.min(children.len()).min(1024));
+        }
         if largest.len() < limit {
             largest.push(Reverse(candidate));
         } else if candidate > largest.peek().unwrap().0 {
@@ -83,10 +126,10 @@ pub fn visible_items(
         .into_iter()
         .map(|Reverse((weight, Reverse(id)))| (id, weight))
         .collect();
-    items.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     if collapsed_count != 0 {
         items.push((COLLAPSED_ID, collapsed_bytes));
     }
+    items.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     MapItems {
         items,
         collapsed_count,
@@ -108,7 +151,7 @@ fn collapsed(count: usize, bytes: u64, drawable: bool) -> MapItems {
 
 #[cfg(test)]
 mod tests {
-    use super::{COLLAPSED_ID, visible_items};
+    use super::{COLLAPSED_ID, visible_items, visible_items_with_total};
     use std::time::Instant;
 
     fn sum(items: &[(usize, u64)]) -> u64 {
@@ -123,7 +166,7 @@ mod tests {
         let result = visible_items(&[1, 5, 3, 6, 0, 2, 4], &weights, 1_000_000.0, 4);
         assert_eq!(
             result.items,
-            [(4, 60), (0, 50), (2, 40), (COLLAPSED_ID, 60)]
+            [(4, 60), (COLLAPSED_ID, 60), (0, 50), (2, 40)]
         );
         assert_eq!(result.collapsed_count, 3);
         assert_eq!(result.collapsed_bytes, 60);
@@ -142,7 +185,7 @@ mod tests {
     fn equal_weights_use_ids_to_break_ties_independently_of_source_order() {
         let first = visible_items(&[5, 1, 4, 0, 3, 2], &[10; 6], 10000.0, 4);
         let second = visible_items(&[2, 3, 0, 4, 1, 5], &[10; 6], 10000.0, 4);
-        assert_eq!(first.items, [(0, 10), (1, 10), (2, 10), (COLLAPSED_ID, 30)]);
+        assert_eq!(first.items, [(COLLAPSED_ID, 30), (0, 10), (1, 10), (2, 10)]);
         assert_eq!(first.items, second.items);
     }
 
@@ -238,5 +281,68 @@ mod tests {
         );
         // No machine-speed assertion: rectangle count and complete accounting
         // are the invariant, and the printed timing can be inspected directly.
+    }
+
+    #[test]
+    fn known_parent_total_matches_the_general_path_for_filtered_unsorted_weights() {
+        let weights: Vec<_> = (0..10_000)
+            .map(|id| {
+                if id % 7 == 0 {
+                    0
+                } else {
+                    ((id * 997) % 9999 + 1) as u64
+                }
+            })
+            .collect();
+        let children: Vec<_> = (0..weights.len()).rev().collect();
+        let total = weights
+            .iter()
+            .fold(0_u64, |sum, weight| sum.saturating_add(*weight));
+        for area in [0.0, 1.0, 1000.0, 2_000_000.0, f32::NAN] {
+            for limit in [0, 1, 2, 16, 1024, 20_000] {
+                let general = visible_items(&children, &weights, area, limit);
+                let known = visible_items_with_total(&children, &weights, total, area, limit);
+                assert_eq!(known.items, general.items);
+                assert_eq!(known.collapsed_count, general.collapsed_count);
+                assert_eq!(known.collapsed_bytes, general.collapsed_bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn known_saturated_total_preserves_every_omitted_weight() {
+        let weights = [u64::MAX, u64::MAX, u64::MAX / 2, 11, 0];
+        for limit in [0, 1, 2, 3, 10] {
+            let result =
+                visible_items_with_total(&[4, 3, 2, 1, 0], &weights, u64::MAX, 2_000_000.0, limit);
+            if limit != 0 {
+                assert_eq!(sum(&result.items), u64::MAX);
+                assert!(result.items.len() <= limit);
+            }
+            let selected: Vec<_> = result
+                .items
+                .iter()
+                .filter(|(id, _)| *id != COLLAPSED_ID)
+                .map(|(id, _)| *id)
+                .collect();
+            let omitted = weights
+                .iter()
+                .enumerate()
+                .filter(|(id, weight)| **weight != 0 && !selected.contains(id));
+            let expected = omitted.fold(0_u64, |sum, (_, weight)| sum.saturating_add(*weight));
+            assert_eq!(result.collapsed_bytes, expected);
+            assert_eq!(result.collapsed_count + selected.len(), 4);
+        }
+    }
+
+    #[test]
+    fn output_is_already_in_the_geometry_sort_order() {
+        let result = visible_items_with_total(&[4, 3, 2, 1, 0], &[9, 3, 7, 1, 20], 40, 10000.0, 4);
+        assert!(
+            result.items.windows(2).all(
+                |pair| pair[0].1 > pair[1].1 || pair[0].1 == pair[1].1 && pair[0].0 < pair[1].0
+            )
+        );
+        assert_eq!(sum(&result.items), 40);
     }
 }

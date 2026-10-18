@@ -1396,9 +1396,10 @@ fn collect_tiles_with_limit(
         return;
     }
     let inner = Rect::from_min_max(rect.min + Vec2::new(3.0, 20.0), rect.max - Vec2::splat(4.0));
-    let items = space_sniffer::map_items::visible_items(
+    let items = space_sniffer::map_items::visible_items_with_total(
         &node.children,
         weights,
+        weights[id],
         inner.area(),
         1024.min(ceiling - out.len()),
     );
