@@ -4,7 +4,7 @@ use eframe::egui::{
 use space_sniffer::{
     export, format_bytes,
     live::{self, Change, LiveEvent, LiveHandle},
-    live_tree::LiveTree,
+    live_tree::{FilterJob, LiveTree},
     model::{EntryKind, Node, ScanStats, ScanTree},
     scanner::ScanProgress,
     treemap,
@@ -51,6 +51,8 @@ pub struct App {
     drives: Vec<PathBuf>,
     map_cache: Option<MapCache>,
     list_cache: Option<ChildList>,
+    filter_job: Option<PendingFilter>,
+    prepared_model: Option<PreparedModel>,
 }
 
 impl App {
@@ -137,6 +139,8 @@ impl App {
             drives: crate::drives::roots(),
             map_cache: None,
             list_cache: None,
+            filter_job: None,
+            prepared_model: None,
         }
     }
 
@@ -169,6 +173,10 @@ impl App {
     }
 
     fn stop(&mut self) {
+        self.filter_job = None;
+        if let Some(prepared) = self.prepared_model.take() {
+            drop_in_background(prepared);
+        }
         if let Some(live) = self.live.take() {
             live.cancel.store(true, Ordering::Relaxed);
             // A queued Ready may own millions of paths. Releasing its receiver
@@ -189,6 +197,40 @@ impl App {
     }
 
     fn poll_live(&mut self) {
+        if let Some(prepared) = &self.prepared_model {
+            match prepared.receiver.try_recv() {
+                Ok(Ok(model)) => {
+                    let prepared = self.prepared_model.take().unwrap();
+                    let target = if space_sniffer::filter::Filter::parse(&self.query).is_ok() {
+                        self.query.clone()
+                    } else {
+                        self.applied.clone()
+                    };
+                    if target != prepared.query {
+                        self.prepare_model(model, target);
+                        return;
+                    }
+                    self.applied = prepared.query;
+                    self.finish_install_model(model);
+                }
+                Ok(Err(error)) => {
+                    self.prepared_model = None;
+                    self.loading = false;
+                    self.error = Some(error);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.prepared_model = None;
+                    self.loading = false;
+                    self.error = Some("Preparing the completed map stopped unexpectedly".into());
+                }
+            }
+        }
+        // Keep the source stable while a sliced filter is computed. The live
+        // channel is bounded; scan previews never wait for space in that queue.
+        if self.filter_job.is_some() {
+            return;
+        }
         let budget = Instant::now();
         while let Some(live) = &self.live {
             let result = live.receiver.try_recv();
@@ -215,6 +257,9 @@ impl App {
                     self.error = Some(error);
                 }
             }
+            if self.prepared_model.is_some() || self.filter_job.is_some() {
+                break;
+            }
             if budget.elapsed() > Duration::from_millis(8) {
                 self.ctx.request_repaint();
                 break;
@@ -222,7 +267,35 @@ impl App {
         }
     }
 
-    fn install_model(&mut self, model: LiveTree) {
+    fn install_model(&mut self, mut model: LiveTree) {
+        if !self.applied.is_empty() {
+            if model.tree.nodes.len() > 32_768 {
+                self.prepare_model(model, self.applied.clone());
+                return;
+            }
+            let _ = model.set_filter(&self.applied);
+        }
+        self.finish_install_model(model);
+    }
+
+    fn prepare_model(&mut self, mut model: LiveTree, query: String) {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        self.prepared_model = Some(PreparedModel {
+            receiver,
+            query: query.clone(),
+        });
+        let ctx = self.ctx.clone();
+        let _ = std::thread::Builder::new()
+            .name("prepare-map".into())
+            .spawn(move || {
+                let result = model.set_filter(&query).map(|()| model);
+                let _ = sender.send(result);
+                ctx.request_repaint();
+            });
+    }
+
+    fn finish_install_model(&mut self, model: LiveTree) {
+        self.filter_job = None;
         let (selected, zoom) = if self.loaded {
             (
                 self.model.tree.nodes[self.selected].path.clone(),
@@ -235,11 +308,6 @@ impl App {
             )
         };
         self.replace_model(model);
-        // The worker already built unfiltered weights. Avoid traversing the
-        // whole tree on the UI thread for the common empty-filter case.
-        if !self.applied.is_empty() {
-            let _ = self.model.set_filter(&self.applied);
-        }
         self.loaded = true;
         self.loading = false;
         self.partial = false;
@@ -396,6 +464,22 @@ impl App {
     }
 
     fn apply_filter(&mut self) {
+        self.filter_job = None;
+        if self.model.tree.nodes.len() > 32_768 {
+            match self.model.begin_filter(&self.query) {
+                Ok(job) => {
+                    self.filter_job = Some(PendingFilter {
+                        query: self.query.clone(),
+                        job,
+                    });
+                    self.filter_error = None;
+                    self.advance_filter();
+                }
+                Err(error) => self.filter_error = Some(error),
+            }
+            self.query_changed = None;
+            return;
+        }
         match self.model.set_filter(&self.query) {
             Ok(()) => {
                 self.applied = self.query.clone();
@@ -405,6 +489,43 @@ impl App {
             Err(error) => self.filter_error = Some(error),
         }
         self.query_changed = None;
+    }
+
+    fn advance_filter(&mut self) {
+        let Some(mut pending) = self.filter_job.take() else {
+            return;
+        };
+        if pending.job.is_stale(&self.model) {
+            self.query_changed = Some(Instant::now() - Duration::from_millis(150));
+            self.ctx.request_repaint();
+            return;
+        }
+        let started = Instant::now();
+        loop {
+            match pending.job.step(&self.model, 1024) {
+                Ok(true) => {
+                    match self.model.commit_filter(pending.job) {
+                        Ok(()) => {
+                            self.applied = pending.query;
+                            self.filter_error = None;
+                            self.invalidate();
+                        }
+                        Err(error) => self.filter_error = Some(error),
+                    }
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.filter_error = Some(error);
+                    return;
+                }
+            }
+            if started.elapsed() >= Duration::from_millis(2) {
+                self.filter_job = Some(pending);
+                self.ctx.request_repaint();
+                return;
+            }
+        }
     }
 
     fn navigate(&mut self, id: usize) {
@@ -825,6 +946,18 @@ impl App {
                                 .truncate(),
                         );
                     }
+                    if let Some(pending) = &self.filter_job {
+                        let percent = pending.job.processed() as f64
+                            / pending.job.total().max(1) as f64
+                            * 100.0;
+                        ui.label(
+                            RichText::new(format!("Filtering · {percent:.0}%"))
+                                .small()
+                                .color(ACCENT),
+                        );
+                    } else if self.prepared_model.is_some() {
+                        ui.label(RichText::new("Filtering…").small().color(ACCENT));
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new("Logical bytes").small().color(MUTED));
                     });
@@ -1106,6 +1239,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_live();
+        self.advance_filter();
         if let Some(changed) = self.query_changed {
             let elapsed = changed.elapsed();
             if elapsed >= Duration::from_millis(150) {
@@ -1200,6 +1334,16 @@ struct ChildList {
     cursor: usize,
     has_more: bool,
     complete: bool,
+}
+
+struct PendingFilter {
+    query: String,
+    job: FilterJob,
+}
+
+struct PreparedModel {
+    receiver: std::sync::mpsc::Receiver<Result<LiveTree, String>>,
+    query: String,
 }
 
 fn drop_in_background(value: impl Send + 'static) {
@@ -1406,6 +1550,22 @@ mod tests {
             "million-node egui frame rebuilt: median {:.3} ms, p95 {:.3} ms; cached: median {:.3} ms, p95 {:.3} ms",
             rebuilt[10], rebuilt[19], cached[10], cached[19]
         );
+        app.query = "*.zip; >0B".into();
+        let mut slices = Vec::new();
+        let started = Instant::now();
+        app.apply_filter();
+        slices.push(started.elapsed().as_secs_f64() * 1000.0);
+        while app.filter_job.is_some() {
+            let started = Instant::now();
+            app.advance_filter();
+            slices.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!(
+            "million-node filter: {} slices, longest UI call {:.3}ms, total CPU {:.3}ms",
+            slices.len(),
+            slices.iter().copied().fold(0.0_f64, f64::max),
+            slices.iter().sum::<f64>()
+        );
         let started = Instant::now();
         app.install_model(LiveTree::new(tree(0)));
         println!(
@@ -1611,6 +1771,69 @@ mod tests {
         }
         assert!(app.list_cache.as_ref().unwrap().complete);
         assert!(app.list_cache.as_ref().unwrap().ids.is_empty());
+    }
+
+    #[test]
+    fn sliced_filter_defers_live_changes_until_its_atomic_commit() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(40_000)));
+        let path = app.model.tree.nodes[2].path.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        sender
+            .send(LiveEvent::Changes(vec![Change::Upsert {
+                path,
+                kind: EntryKind::File,
+                size: 100,
+                modified: None,
+            }]))
+            .unwrap();
+        app.live = Some(LiveHandle {
+            receiver,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        app.query = "*.zip".into();
+        app.filter_job = Some(PendingFilter {
+            query: app.query.clone(),
+            job: app.model.begin_filter(&app.query).unwrap(),
+        });
+        app.poll_live();
+        assert_eq!(app.model.tree.nodes[2].size, 10);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.filter_job.is_some() && Instant::now() < deadline {
+            app.advance_filter();
+        }
+        assert!(app.filter_job.is_none());
+        assert_eq!(app.model.weights[0], 40_010);
+        app.poll_live();
+        assert_eq!(app.model.tree.nodes[2].size, 100);
+        assert_eq!(app.model.weights[0], 40_100);
+    }
+
+    #[test]
+    fn completed_large_map_keeps_the_old_filtered_view_while_preparing() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(0)));
+        app.navigate(1);
+        app.selected = 2;
+        app.query = "*.zip".into();
+        app.apply_filter();
+        app.install_model(LiveTree::new(tree(40_000)));
+        assert!(app.prepared_model.is_some());
+        assert_eq!(app.model.tree.nodes.len(), 4);
+        assert_eq!(app.model.weights[0], 10);
+        // An invalid newer query must retain the last valid filter on Ready.
+        app.query = ">oops".into();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.prepared_model.is_some() && Instant::now() < deadline {
+            app.poll_live();
+            std::thread::yield_now();
+        }
+        assert!(app.prepared_model.is_none());
+        assert_eq!(app.model.tree.nodes.len(), 40_004);
+        assert_eq!(app.model.weights[0], 40_010);
+        assert_eq!(app.applied, "*.zip");
+        assert_eq!((app.zoom, app.selected), (1, 2));
+        assert!(app.filter_error.is_some());
     }
 
     #[test]
