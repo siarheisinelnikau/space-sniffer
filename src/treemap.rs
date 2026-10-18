@@ -18,12 +18,6 @@ pub struct Tile {
     pub rect: Rect,
 }
 
-#[derive(Clone, Copy)]
-struct Item {
-    id: usize,
-    weight: u64,
-}
-
 /// Lay out nonzero items with area proportional to their weight.
 ///
 /// Tiles are returned in descending weight order, with ascending IDs breaking
@@ -51,14 +45,31 @@ pub fn layout(items: &[(usize, u64)], bounds: Rect) -> Vec<Tile> {
         return Vec::new();
     }
 
-    let mut sorted: Vec<Item> = items
-        .iter()
-        .filter(|(_, weight)| *weight != 0)
-        .map(|&(id, weight)| Item { id, weight })
-        .collect();
-    sorted.sort_unstable_by(|a, b| b.weight.cmp(&a.weight).then(a.id.cmp(&b.id)));
+    // LOD selection already produces this order. Borrow it directly instead
+    // of allocating and sorting another copy for every displayed directory.
+    let mut prepared = Vec::new();
+    let sorted = if ordered_nonzero(items) {
+        items
+    } else {
+        prepared.extend(items.iter().copied().filter(|(_, weight)| *weight != 0));
+        prepared.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        &prepared
+    };
     if sorted.is_empty() {
         return Vec::new();
+    }
+
+    let clip = Clip {
+        left: bounds.x,
+        top: bounds.y,
+        right: floor_f32(right),
+        bottom: floor_f32(bottom),
+    };
+    if sorted.len() == 1 {
+        return vec![Tile {
+            id: sorted[0].0,
+            rect: clip.rect(left, top, right, bottom),
+        }];
     }
 
     // Suffix totals avoid subtracting a large row from the total and losing
@@ -66,15 +77,9 @@ pub fn layout(items: &[(usize, u64)], bounds: Rect) -> Vec<Tile> {
     // the total as accurate as possible without an integer overflow.
     let mut remaining = vec![0.0; sorted.len() + 1];
     for index in (0..sorted.len()).rev() {
-        remaining[index] = remaining[index + 1] + sorted[index].weight as f64;
+        remaining[index] = remaining[index + 1] + sorted[index].1 as f64;
     }
     let area_per_weight = (right - left) * (bottom - top) / remaining[0];
-    let clip = Clip {
-        left: bounds.x,
-        top: bounds.y,
-        right: floor_f32(right),
-        bottom: floor_f32(bottom),
-    };
     let mut tiles = Vec::with_capacity(sorted.len());
     let mut start = 0;
 
@@ -87,7 +92,7 @@ pub fn layout(items: &[(usize, u64)], bounds: Rect) -> Vec<Tile> {
             // weight is overwhelmingly larger than the remaining weights.
             for item in &sorted[start..] {
                 tiles.push(Tile {
-                    id: item.id,
+                    id: item.0,
                     rect: clip.rect(left, top, left, top),
                 });
             }
@@ -95,13 +100,14 @@ pub fn layout(items: &[(usize, u64)], bounds: Rect) -> Vec<Tile> {
         }
 
         let mut end = start + 1;
-        let largest = sorted[start].weight as f64;
+        let largest = sorted[start].1 as f64;
         let mut sum = largest;
-        let mut score = worst_ratio(sum, largest, largest, side, area_per_weight);
+        let side_in_weights = side * side / area_per_weight;
+        let mut score = worst_ratio(sum, largest, largest, side_in_weights);
         while end < sorted.len() {
-            let smallest = sorted[end].weight as f64;
+            let smallest = sorted[end].1 as f64;
             let candidate_sum = sum + smallest;
-            let candidate = worst_ratio(candidate_sum, largest, smallest, side, area_per_weight);
+            let candidate = worst_ratio(candidate_sum, largest, smallest, side_in_weights);
             if candidate > score {
                 break;
             }
@@ -120,15 +126,16 @@ pub fn layout(items: &[(usize, u64)], bounds: Rect) -> Vec<Tile> {
                 (left + width * fraction).clamp(left, right)
             };
             let mut row_top = top;
+            let height_per_weight = height / sum;
             for (index, item) in sorted.iter().enumerate().take(end).skip(start) {
-                prefix += item.weight as f64;
+                prefix += item.1 as f64;
                 let row_bottom = if index + 1 == end {
                     bottom
                 } else {
-                    (top + height * (prefix / sum)).clamp(row_top, bottom)
+                    (top + height_per_weight * prefix).clamp(row_top, bottom)
                 };
                 tiles.push(Tile {
-                    id: item.id,
+                    id: item.0,
                     rect: clip.rect(left, row_top, strip_right, row_bottom),
                 });
                 row_top = row_bottom;
@@ -142,15 +149,16 @@ pub fn layout(items: &[(usize, u64)], bounds: Rect) -> Vec<Tile> {
                 (top + height * fraction).clamp(top, bottom)
             };
             let mut column_left = left;
+            let width_per_weight = width / sum;
             for (index, item) in sorted.iter().enumerate().take(end).skip(start) {
-                prefix += item.weight as f64;
+                prefix += item.1 as f64;
                 let column_right = if index + 1 == end {
                     right
                 } else {
-                    (left + width * (prefix / sum)).clamp(column_left, right)
+                    (left + width_per_weight * prefix).clamp(column_left, right)
                 };
                 tiles.push(Tile {
-                    id: item.id,
+                    id: item.0,
                     rect: clip.rect(column_left, top, column_right, strip_bottom),
                 });
                 column_left = column_right;
@@ -165,10 +173,24 @@ pub fn layout(items: &[(usize, u64)], bounds: Rect) -> Vec<Tile> {
 
 // This is the squarify worst-aspect-ratio criterion, expressed using weights
 // instead of allocating another array of normalized areas.
-fn worst_ratio(sum: f64, largest: f64, smallest: f64, side: f64, scale: f64) -> f64 {
-    let side_in_weights = side * side / scale;
+fn worst_ratio(sum: f64, largest: f64, smallest: f64, side_in_weights: f64) -> f64 {
     let sum_squared = sum * sum;
     (side_in_weights * largest / sum_squared).max(sum_squared / (side_in_weights * smallest))
+}
+
+fn ordered_nonzero(items: &[(usize, u64)]) -> bool {
+    let mut previous = None;
+    for &(id, weight) in items {
+        if weight == 0
+            || previous.is_some_and(|(previous_id, previous_weight)| {
+                weight > previous_weight || weight == previous_weight && id < previous_id
+            })
+        {
+            return false;
+        }
+        previous = Some((id, weight));
+    }
+    true
 }
 
 struct Clip {
@@ -438,5 +460,20 @@ mod tests {
         assert_eq!(tiles.len(), items.len());
         assert_geometry(&tiles, bounds);
         assert_proportions(&items, &tiles, bounds, 0.0001);
+    }
+
+    #[test]
+    fn ordered_borrowed_input_matches_the_unsorted_path_exactly() {
+        let ordered = [(7, 93), (2, 41), (9, 41), (1, 17), (3, 5)];
+        let unordered = [(3, 5), (9, 41), (2, 41), (1, 17), (7, 93), (100, 0)];
+        let borrowed = layout(&ordered, bounds());
+        let prepared = layout(&unordered, bounds());
+        assert_eq!(borrowed.len(), prepared.len());
+        for (a, b) in borrowed.iter().zip(&prepared) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.rect, b.rect);
+        }
+        assert_geometry(&borrowed, bounds());
+        assert_proportions(&ordered, &borrowed, bounds(), 0.00001);
     }
 }
