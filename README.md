@@ -22,7 +22,7 @@ This is an independent implementation inspired by [SpaceSniffer by Uderzo Softwa
 - Drive shortcuts, a root path field, and an empty start screen until you choose a location.
 - A command-line scan summary without opening a window.
 
-On a generated 20,000-file Windows fixture with warm metadata, the scanner improved from **292.89 ms to 10.61 ms** versus the previous serial implementation. This measures traversal, metadata, and sorting in an optimized standalone harness; it is not a whole-drive or cold-cache guarantee. See [methodology and results](docs/performance.md).
+Large-tree work is measured separately from disk I/O: million-entry filtering runs in short UI slices, and the map aggregates small files instead of drawing millions of rectangles. A dense 8,000-tile CPU frame benchmark improved from roughly **18 ms to 5 ms**. See [benchmarks, methodology, and limits](docs/performance.md); these are local CPU measurements, not whole-drive or frame-rate guarantees.
 
 Scanning reads filesystem metadata. The app has no file deletion feature or telemetry. Export writes only the report you choose to save.
 
@@ -87,6 +87,8 @@ During scanning, **Discovered so far** counts only data already shown on the map
 **Stop** cancels scanning or watching and keeps the current map. A stopped initial scan remains explicitly marked **Partial map**. **Export CSV** becomes available after the initial scan completes, so a preview cannot be mistaken for a full report. Restart the root or use an optional full rescan to finish a stopped scan.
 
 The left sidebar contains root selection, watcher status, filters, depth, colors, selection details, and export. **LIVE** indicates an active native watcher; status messages explain recovery or fallback behavior. The map is cached between relevant changes, and an idle watcher does not continuously redraw the window.
+
+Large filters show **Filtering** progress while the previous filter stays visible. File events wait in a bounded queue until the result is installed; filesystem scanning continues. Small entries are grouped into a tile showing their combined bytes and count. Zoom or filter to inspect them.
 
 | Control | Action |
 | --- | --- |

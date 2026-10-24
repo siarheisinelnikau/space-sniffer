@@ -1,6 +1,6 @@
 # Architecture
 
-Space Sniffer 0.3 is a native Rust disk explorer with a progressively populated initial map, parallel scanning, and automatic filesystem updates. eframe hosts egui with Glow/OpenGL; rfd supplies file dialogs. The GUI starts empty until the user chooses a drive, folder, or root path. Controls and selection details share a compact, resizable left sidebar.
+Space Sniffer 0.4 is a native Rust disk explorer with a progressively populated initial map, parallel scanning, and automatic filesystem updates. eframe hosts egui with Glow/OpenGL; rfd supplies file dialogs. The GUI starts empty until the user chooses a drive, folder, or root path. Controls and selection details share a compact, resizable left sidebar.
 
 ## Modules
 
@@ -29,7 +29,7 @@ Space Sniffer 0.3 is a native Rust disk explorer with a progressively populated 
 
 The coordinator owns the arena and statistics. Up to `min(available_parallelism, 8)` scoped workers enumerate independent directories and construct batches of at most 512 entries. Each worker has a one-job channel; a shared results channel holds at most two batches per worker. Metadata collection needs no per-file mutex. Only the coordinator merges nodes, schedules directories, and calls progress callbacks.
 
-`DirEntry::metadata()` preserves no-follow semantics and reuses cached enumeration metadata on Windows, avoiding an extra filesystem call per file. Queued directories are checked for links/reparse points again before enumeration. Sizes are aggregated and children sorted by descending size, then name/path. Worker order can change arena IDs; visible ordering and totals remain deterministic.
+`DirEntry::metadata()` preserves no-follow semantics and reuses cached enumeration metadata on Windows, avoiding an extra filesystem call per file. Queued directories are checked for links/reparse points again before enumeration. File bytes are accumulated into their direct directory during batch merging; finalization walks only discovered directories in reverse order. Children are sorted by descending size, then name/path. Wide already-ordered lists skip sorting; wide unsorted sorts cache compact size/ID entries and observed sorts retain cancellation checkpoints. Worker order can change arena IDs; visible ordering and totals remain deterministic.
 
 Progress is throttled to roughly 100 ms, including waits for directory I/O. `start_scan` bounds its public channel to two events, drops excess intermediate progress, and reliably sends completion while the receiver exists. Atomic cancellation discards the scanner's partial return value; the GUI can retain an already published preview. Job and result channels disconnect before joins on cancellation/error, releasing workers blocked by backpressure. Operating system calls already in progress cannot be interrupted. Exceptionally wide observed child lists sort in bounded runs with merge checkpoints so long final sorting remains observable and cancellable.
 
@@ -53,6 +53,8 @@ The live worker uses notify's `RecommendedWatcher`: ReadDirectoryChangesW on Win
 
 The raw notification queue is bounded to 1,024 events, output to eight events, and pending paths to 4,096. Changes coalesce after 100 ms of quiet, with a maximum 250 ms batch age during sustained writes. Access and access-time-only events are ignored to avoid loops triggered by scanning. These are batching intervals, not end-to-end latency guarantees.
 
+The GUI applies at most one tree-bearing event per frame and yields after a cooperative 4 ms status/progress budget. This leaves input and drawing opportunities between preview chunks; an individual large allocation or subtree change can still take longer.
+
 Ordinary file events inspect metadata and produce `Upsert` or `Remove`. Created, renamed, or uncertain directory events rescan only the affected subtree with `ReplaceSubtree`. Lost events, pending overflow, and explicit watcher rescan requests trigger root reconciliation.
 
 Native setup failures or runtime errors publish a status change and switch to full snapshot polling every two seconds, retrying native watching every five seconds. Unchanged polling snapshots are suppressed. Polling is a recovery mode and can be expensive on a large root; notification support and network-share behavior depend on the platform/filesystem.
@@ -60,6 +62,8 @@ Native setup failures or runtime errors publish a status change and switch to fu
 ## Incremental model
 
 `LiveTree` maintains a path-to-ID index, live-slot markers, reusable slots, the active filter, and visible-byte weights. Ordinary file changes update the leaf and its ancestors, adjust file/directory/link counters, and reposition siblings using binary search. Directory replacement walks the affected subtree. Editing a filter recomputes connected-node weights without restarting filesystem scanning.
+
+The index is split into 1,024 small hash maps, storing randomized normalized-path hashes and node IDs rather than duplicate full-path strings. Hits are verified against the actual node path; explicit collision buckets preserve distinct paths even with identical hashes. Construction caches normalized directory prefixes and processes ordered initial arenas sequentially. Sharding spreads resizing work across small maps, although the contiguous node arena can still require a large reallocation during growth.
 
 Removed slots are disconnected, zeroed, and recycled after an update batch. A live tree therefore does **not** preserve parent-before-child arena order. Live filtering traverses connected children rather than relying on static reverse-index aggregation. The UI restores selection and zoom by path because later batches can reuse removed IDs; deleted views return to a surviving ancestor.
 
@@ -75,9 +79,11 @@ Root access failures fail a scan. Unreadable, disappearing, or unsupported desce
 
 The sidebar holds root selection, status, filters, depth/colors, selection details, discovered/largest entries, and export. Changing the root starts a new session; Stop cancels scanning/watching while retaining a marked partial map when applicable. `F5` is an optional full rescan. Startup waits for root selection. CSV is enabled only after initial completion.
 
-Filters combine semicolon-separated clauses with AND. Names use case-insensitive substrings or whole-name `*`/`?` globs; `|` excludes a pattern. Strict `<` and `>` accept decimal or IEC quantities. Invalid queries retain the last valid filter. Input is debounced for 150 ms; live updates maintain weights for the active filter.
+Filters combine semicolon-separated clauses with AND. Names use case-insensitive substrings or whole-name `*`/`?` globs; `|` excludes a pattern. Strict `<` and `>` accept decimal or IEC quantities. Invalid queries retain the last valid filter. Input is debounced for 150 ms; live updates maintain weights for the active filter. ASCII matching avoids temporary lowercase/character buffers, with a Unicode fallback.
 
-`treemap::layout` accepts IDs, weights, and bounds, sorting nonzero items and computing in `f64` before returning guarded `f32` rectangles. The GUI nests layouts to the selected depth and caches geometry by view revision, bounds, zoom, and depth. Changes outside the zoomed subtree update totals without invalidating that subtree's geometry. Tiny tiles have bounded drawing work, and the largest-entry list is cached. Colors are applied while painting.
+`LiveTree::begin_filter` creates a revision-guarded `FilterJob`; bounded `step` calls build a new weight buffer without changing active weights. `commit_filter` rejects stale/incomplete jobs and atomically installs a completed result. The GUI uses 1,024-node steps and a cooperative 2 ms budget for models above 32,768 entries, pausing live-event application until completion. Ordered scans aggregate backwards; models with recycled IDs use a child-cursor postorder traversal without pushing every sibling onto a stack. Final large models with an existing filter are prepared on a worker before replacement. Old large models and stopped live receivers are released on background threads so destruction cannot stall an interaction.
+
+`treemap::layout` accepts IDs, weights, and bounds, borrowing already-ordered nonzero input when possible and computing in `f64` before returning guarded `f32` rectangles. `visible_items_with_total` uses the parent weight to select drawable children in one pass and aggregate the rest. The GUI nests layouts to the selected depth and caches geometry and colors by view revision, bounds, zoom, and depth. Changes outside the zoomed subtree update totals without invalidating that subtree's geometry. A global 8,000-tile limit reserves one slot for each pending sibling. Painting combines fill/border shapes and omits rounded corners and labels on tiny tiles. The largest-entry list caches at most 100 rows; sparse filtered lists advance through bounded child slices.
 
 ## Exports and platform actions
 
