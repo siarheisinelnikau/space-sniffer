@@ -1,6 +1,6 @@
 # Contributing
 
-Bug reports, focused fixes, performance improvements, and platform testing are welcome. English and Russian reports are both welcome.
+Bug reports, focused fixes, performance improvements, and platform testing are welcome. Please write issues, pull requests, interface text, and documentation in English.
 
 This is an independent Rust implementation inspired by [Uderzo Software's SpaceSniffer](https://www.uderzo.it/main_products/space_sniffer/), without affiliation. Contribute original code and assets or material whose license permits inclusion under the project's MIT license. Do not copy the original application's source or assets.
 
@@ -50,6 +50,10 @@ For live-update changes, verify totals, matching weights, file/directory/link co
 Include your operating system, Rust version, reproduction steps, expected result, and actual result. For scan issues, describe the directory structure and relevant permissions or link types. Share a minimal example rather than a report containing private paths.
 
 Keep pull requests focused. Describe the user-visible behavior, why it changed, and the checks performed. Keep the interface and documentation in English. Update the README when changing controls, filter syntax, installation steps, or size semantics. [Architecture notes](docs/architecture.md) explain the module boundaries.
+
+### macOS contributions
+
+Use the dedicated [`macos` branch](https://github.com/siarheisinelnikau/space-sniffer/tree/macos) as both your starting point and your PR base for macOS-specific work. Follow its [porting guide](https://github.com/siarheisinelnikau/space-sniffer/blob/macos/docs/macos.md). The maintainer has no Mac for manual desktop testing, so a successful build or CI run must not be described as verified GUI support. Please include macOS version, hardware architecture, commands run, observed results, and remaining problems. GUI verification, mounted-volume behavior, permissions, Finder integration, and app packaging/signing contributions are welcome. Shared fixes should target `main`; they can then be merged into `macos`.
 
 ## Releases
 
