@@ -136,7 +136,7 @@ impl App {
             revision: 0,
             map_revision: 0,
             updates: 0,
-            drives: crate::drives::roots(),
+            drives: crate::platform::roots(),
             map_cache: None,
             list_cache: None,
             filter_job: None,
@@ -807,7 +807,8 @@ impl App {
                 ui.ctx().copy_text(path.clone());
             }
             if ui.button("Reveal").clicked()
-                && let Err(error) = reveal(&self.model.tree.nodes[self.selected])
+                && let Err(error) =
+                    crate::platform::reveal(&self.model.tree.nodes[self.selected].path, is_dir)
             {
                 self.error = Some(error);
             }
@@ -1268,7 +1269,7 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(150) - elapsed);
             }
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O)) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.choose_folder();
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5))
@@ -1310,7 +1311,10 @@ impl eframe::App for App {
                 ui.label("Choose any drive or folder. Changes update the map automatically.");
                 ui.label("The first scan fills the map progressively; sizes show discovered data.");
                 ui.label("Click: inspect. Double-click: zoom. Backspace: parent.");
-                ui.label("Ctrl+O: choose root. F5: optional full rescan.");
+                ui.label(format!(
+                    "{}: choose root. F5: optional full rescan.",
+                    crate::platform::OPEN_SHORTCUT_LABEL
+                ));
                 ui.separator();
                 ui.monospace("*.zip; >100mb; |backup*");
                 ui.label("Combine filename and size filters with semicolons.");
@@ -1495,35 +1499,6 @@ fn color(node: &Node, classic: bool, level: usize) -> Color32 {
         "exe" | "dll" | "msi" | "dmg" | "app" | "so" => Color32::from_rgb(113, 94, 157),
         _ => Color32::from_rgb(76, 99, 128),
     }
-}
-
-fn reveal(node: &Node) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("explorer.exe")
-        .arg(if node.is_dir() {
-            node.path.as_os_str().to_os_string()
-        } else {
-            let mut arg = std::ffi::OsString::from("/select,");
-            arg.push(&node.path);
-            arg
-        })
-        .spawn();
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open")
-        .arg("-R")
-        .arg(&node.path)
-        .spawn();
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let result = std::process::Command::new("xdg-open")
-        .arg(if node.is_dir() {
-            node.path.as_path()
-        } else {
-            node.path.parent().unwrap_or(&node.path)
-        })
-        .spawn();
-    result
-        .map(|_| ())
-        .map_err(|error| format!("Could not reveal entry: {error}"))
 }
 
 #[cfg(test)]
