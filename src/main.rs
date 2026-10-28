@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod app;
 mod demo;
 
@@ -5,6 +7,24 @@ use std::{path::PathBuf, sync::atomic::AtomicBool};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(target_os = "windows")]
+    if args
+        .first()
+        .is_some_and(|arg| arg.to_string_lossy().starts_with('-'))
+    {
+        // A GUI launch should not create a console. Explicit CLI commands
+        // attach to the caller's console; inherited redirected handles work
+        // even when there is no console to attach to.
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn AttachConsole(process_id: u32) -> i32;
+        }
+        // SAFETY: ATTACH_PARENT_PROCESS is a documented sentinel, and the
+        // function receives no pointers. Failure needs no recovery here.
+        unsafe {
+            AttachConsole(u32::MAX);
+        }
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "--help" || arg == "-h")
