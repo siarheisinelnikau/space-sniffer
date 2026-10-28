@@ -14,7 +14,7 @@ cargo run --locked --release -- PATH
 cargo run --locked --release -- --scan PATH
 ```
 
-Without a path, the GUI displays synthetic demo data. Use a small temporary directory with files of known lengths when checking real scan results.
+Without a path, the GUI waits for a drive or folder selection and does not scan automatically. Use an isolated temporary directory with files of known lengths when checking scans and live changes.
 
 ## Before opening a pull request
 
@@ -27,13 +27,17 @@ cargo test --locked --all-targets
 cargo build --locked --release
 ```
 
-For behavior changes, add a focused test covering a real regression or invariant. Keep filesystem tests isolated in temporary directories. Link and permission behavior differs by platform; state which checks ran and which were skipped. The scanner, filter, export, and treemap modules have tests independent of the GUI.
+For behavior changes, add a focused test covering a real regression or invariant. Keep filesystem tests isolated in temporary directories. Link and permission behavior differs by platform; state which checks ran and which were skipped. The scanner, live model, watcher, filter, export, and treemap modules have tests independent of the GUI.
 
-For interface changes, check the demo and a real small scan. Verify folder zoom, breadcrumbs and history, `Ctrl+O`, `F5`, `Backspace`, the Depth slider, Classic colors, and filtering. Include a screenshot when it helps review a visual change.
+For interface changes, check the empty startup screen and a real scan. Verify arbitrary roots, drive shortcuts, the compact resizable left sidebar, folder zoom, breadcrumbs and history, `Ctrl+O`, optional `F5`, `Backspace`, Depth, Classic colors, filtering, and Stop. Create, write, rename, and delete files while the app is open; the view should update automatically. Keep a selection inside a changed or removed folder and check navigation recovery. Include a screenshot when it helps review a visual change.
 
 For scanner changes, check cancellation, unreadable entries, zero-byte files, and directory totals. Preserve the existing treatment of logical sizes, hard links, symbolic links, and Windows reparse points unless the change explicitly revises that contract and its documentation.
 
 For filter or export changes, verify a combined query such as `*.zip; >100MB; |backup*`, invalid input retaining the previous filter, and an exported subtree containing both original and visible byte counts. CSV must keep its quoting and spreadsheet formula protections.
+
+Compare one scanner worker with multiple workers on flat, broad, and deep trees. Progress callbacks must stay on the coordinator thread, queues must remain bounded, and cancellation must release workers blocked by backpressure. The [scanner benchmark](examples/scan_bench.rs) and [performance notes](docs/performance.md) describe reproducible runs. State cache conditions and storage type: creating a fixture does not produce a cold cache, and parallel access is not always faster on a hard drive.
+
+For live-update changes, verify totals, matching weights, file/directory/link counts, rename pairs, new subdirectories, root replacement, watcher overflow, and recovery. Avoid full-tree work for a single file update. Removed arena slots can be reused: preserve UI selection by path, and do not assume live parents precede children. Watcher events should wake the UI; an unchanged idle session should not request continuous redraws.
 
 ## Reports and pull requests
 
@@ -43,7 +47,7 @@ Keep pull requests focused. Describe the user-visible behavior, why it changed, 
 
 ## Releases
 
-The release workflow runs on pushed tags matching `v*`, for example `v0.1.0`. Before tagging, update `Cargo.toml` and `Cargo.lock` together when changing the package version, run the checks above, and verify a real GUI scan on the supported local platform.
+The release workflow runs on pushed tags matching `v*`, for example `v0.2.0`. Before tagging, update `Cargo.toml` and `Cargo.lock` together when changing the package version, run the checks above, and verify a real GUI scan on the supported local platform.
 
 The workflow builds native release binaries on Windows, Ubuntu 22.04, and macOS 14, packages the executable and documentation, and uploads the archives as workflow artifacts. Once every build succeeds, GitHub CLI creates the GitHub release and attaches the archives and `SHA256SUMS`. A rerun updates assets on an existing release. The workflow does not sign executables or produce installers or macOS app bundles.
 
