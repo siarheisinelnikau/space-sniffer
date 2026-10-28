@@ -76,6 +76,18 @@ impl App {
         if let Some(path) = path {
             app.begin_scan(path);
         }
+        // Development-only capture waits for real scan data before eframe's
+        // second-frame screenshot. Normal builds never block startup here.
+        #[cfg(feature = "screenshots")]
+        if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() && app.loading {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while app.loading && Instant::now() < deadline {
+                app.poll_live();
+                if app.loading {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
         app
     }
 
