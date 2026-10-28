@@ -1,0 +1,16 @@
+[package]
+name = "space-sniffer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A native, open-source disk usage explorer with an interactive treemap"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+rfd = "0.15"
+
+[profile.release]
+lto = "thin"
+strip = true
+
