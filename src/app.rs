@@ -173,22 +173,20 @@ impl App {
 
     fn poll_live(&mut self) {
         let budget = Instant::now();
-        loop {
-            let result = match &self.live {
-                Some(live) => live.receiver.try_recv(),
-                None => break,
-            };
+        while let Some(live) = &self.live {
+            let result = live.receiver.try_recv();
             let event = match result {
                 Ok(event) => event,
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.stop();
+                    self.watch_status = "Monitoring stopped".into();
                     break;
                 }
             };
             match event {
                 LiveEvent::Progress(progress) => self.progress = Some(progress),
-                LiveEvent::Ready(model) => self.install_model(model),
+                LiveEvent::Ready(model) => self.install_model(*model),
                 LiveEvent::Changes(changes) => self.apply_changes(&changes),
                 LiveEvent::Status { watching, message } => {
                     self.watching = watching;
@@ -219,12 +217,21 @@ impl App {
             )
         };
         self.model = model;
-        let _ = self.model.set_filter(&self.applied);
+        // The worker already built unfiltered weights. Avoid traversing the
+        // whole tree on the UI thread for the common empty-filter case.
+        if !self.applied.is_empty() {
+            let _ = self.model.set_filter(&self.applied);
+        }
         self.loaded = true;
         self.loading = false;
         self.error = None;
         self.restore_paths(&selected, &zoom);
-        self.apply_filter();
+        if self.query != self.applied {
+            self.apply_filter();
+        } else {
+            self.query_changed = None;
+            self.filter_error = None;
+        }
         self.invalidate();
     }
 
@@ -234,23 +241,50 @@ impl App {
         }
         let selected = self.model.tree.nodes[self.selected].path.clone();
         let zoom = self.model.tree.nodes[self.zoom].path.clone();
+        let visual_change = changes
+            .iter()
+            .any(|change| self.change_affects_appearance(change));
         let affects_view = changes.iter().any(|change| {
+            if !self.change_affects_appearance(change) {
+                return false;
+            }
             let path = match change {
                 Change::Upsert { path, .. }
                 | Change::ReplaceSubtree { path, .. }
                 | Change::Remove(path) => path,
             };
-            path.starts_with(&zoom) || zoom.starts_with(path)
+            path.ancestors()
+                .find_map(|path| self.model.find(path))
+                .is_none_or(|id| self.is_ancestor(id, self.zoom) || self.is_ancestor(self.zoom, id))
         });
         let update = self.model.apply(changes);
         self.restore_paths(&selected, &zoom);
         if update.changed > 0 {
             self.updates += update.changed as u64;
-            self.revision = self.revision.wrapping_add(1);
+            if visual_change {
+                self.revision = self.revision.wrapping_add(1);
+            }
             if affects_view || self.model.tree.nodes[self.zoom].path != zoom {
                 self.map_revision = self.map_revision.wrapping_add(1);
             }
         }
+    }
+
+    fn change_affects_appearance(&self, change: &Change) -> bool {
+        if let Change::Upsert {
+            path, kind, size, ..
+        } = change
+            && let Some(id) = self.model.find(path)
+        {
+            let node = &self.model.tree.nodes[id];
+            let same_name = path
+                .file_name()
+                .is_none_or(|name| node.name == name.to_string_lossy());
+            return node.kind != *kind
+                || (node.kind == EntryKind::File && node.size != *size)
+                || !same_name;
+        }
+        true
     }
 
     fn restore_paths(&mut self, selected: &Path, zoom: &Path) {
@@ -266,6 +300,18 @@ impl App {
             .ancestors()
             .find_map(|path| self.model.find(path))
             .unwrap_or(self.zoom);
+    }
+
+    fn is_ancestor(&self, ancestor: usize, mut id: usize) -> bool {
+        loop {
+            if ancestor == id {
+                return true;
+            }
+            let Some(parent) = self.model.tree.nodes[id].parent else {
+                return false;
+            };
+            id = parent;
+        }
     }
 
     fn invalidate(&mut self) {
@@ -296,12 +342,15 @@ impl App {
     }
 
     fn history(&mut self, forward: bool) {
-        let stack = if forward {
-            &mut self.forward
-        } else {
-            &mut self.back
-        };
-        while let Some(path) = stack.pop() {
+        loop {
+            let path = if forward {
+                self.forward.pop()
+            } else {
+                self.back.pop()
+            };
+            let Some(path) = path else {
+                break;
+            };
             if let Some(id) = self
                 .model
                 .find(&path)
@@ -778,18 +827,14 @@ impl App {
             });
         }
         let tiles = &self.map_cache.as_ref().unwrap().tiles;
-        let hovered = response.hover_pos().and_then(|pos| {
-            tiles
-                .iter()
-                .rev()
-                .find(|tile| tile.rect.contains(pos))
-                .map(|tile| tile.id)
-        });
-        for tile in tiles {
+        let hovered = response
+            .hover_pos()
+            .and_then(|pos| tiles.iter().rposition(|tile| tile.rect.contains(pos)));
+        for (index, tile) in tiles.iter().enumerate() {
             let node = &self.model.tree.nodes[tile.id];
             let rect = tile.rect.shrink(1.0);
             let mut color = color(node, self.classic, tile.level);
-            if hovered == Some(tile.id) {
+            if hovered == Some(index) {
                 color = color.gamma_multiply(1.17);
             }
             painter.rect_filled(rect, 2.0, color);
@@ -799,6 +844,11 @@ impl App {
                 Stroke::new(1.0_f32, color.gamma_multiply(1.3)),
                 StrokeKind::Inside,
             );
+            let label = if tile.collapsed > 0 {
+                format!("{} smaller entries", tile.collapsed)
+            } else {
+                node.name.clone()
+            };
             let text_rect = if tile.container {
                 Rect::from_min_size(
                     rect.min + Vec2::new(7.0, 2.0),
@@ -813,11 +863,7 @@ impl App {
                     clipped.text(
                         text_rect.left_top(),
                         Align2::LEFT_TOP,
-                        format!(
-                            "{}  ·  {}",
-                            node.name,
-                            format_bytes(self.model.weights[tile.id])
-                        ),
+                        format!("{}  ·  {}", label, format_bytes(tile.bytes)),
                         FontId::proportional(12.0),
                         Color32::from_rgb(227, 235, 246),
                     );
@@ -825,14 +871,14 @@ impl App {
                     clipped.text(
                         text_rect.center() - Vec2::new(0.0, 8.0),
                         Align2::CENTER_CENTER,
-                        &node.name,
+                        &label,
                         FontId::proportional(if rect.width() > 180.0 { 15.0 } else { 12.0 }),
                         Color32::WHITE,
                     );
                     clipped.text(
                         text_rect.center() + Vec2::new(0.0, 12.0),
                         Align2::CENTER_CENTER,
-                        format_bytes(self.model.weights[tile.id]),
+                        format_bytes(tile.bytes),
                         FontId::proportional(11.0),
                         Color32::from_white_alpha(190),
                     );
@@ -840,7 +886,7 @@ impl App {
                     clipped.text(
                         text_rect.left_top(),
                         Align2::LEFT_TOP,
-                        &node.name,
+                        &label,
                         FontId::proportional(11.0),
                         Color32::WHITE,
                     );
@@ -868,11 +914,18 @@ impl App {
                 MUTED,
             );
         }
-        if let Some(id) = hovered {
+        if let Some(index) = hovered {
+            let tile = &tiles[index];
+            let id = tile.id;
             let node = &self.model.tree.nodes[id];
             response.clone().on_hover_ui(|ui| {
-                ui.strong(&node.name);
-                ui.label(format_bytes(node.size));
+                if tile.collapsed > 0 {
+                    ui.strong(format!("{} smaller entries", tile.collapsed));
+                    ui.small("Zoom into this folder or filter to inspect smaller files.");
+                } else {
+                    ui.strong(&node.name);
+                }
+                ui.label(format_bytes(tile.bytes));
                 ui.label(node.path.to_string_lossy());
                 if node.is_dir() {
                     ui.small("Double-click to zoom in");
@@ -990,6 +1043,8 @@ struct DrawTile {
     rect: Rect,
     container: bool,
     level: usize,
+    bytes: u64,
+    collapsed: usize,
 }
 
 struct MapCache {
@@ -1023,19 +1078,21 @@ fn collect_tiles(
         rect,
         container,
         level,
+        bytes: weights[id],
+        collapsed: 0,
     });
     if !container {
         return;
     }
     let inner = Rect::from_min_max(rect.min + Vec2::new(3.0, 20.0), rect.max - Vec2::splat(4.0));
-    let items: Vec<_> = node
-        .children
-        .iter()
-        .map(|&child| (child, weights[child]))
-        .filter(|&(_, weight)| weight > 0)
-        .collect();
+    let items = space_sniffer::map_items::visible_items(
+        &node.children,
+        weights,
+        inner.area(),
+        1024.min(8000 - out.len()),
+    );
     for tile in treemap::layout(
-        &items,
+        &items.items,
         treemap::Rect {
             x: inner.min.x,
             y: inner.min.y,
@@ -1050,6 +1107,17 @@ fn collect_tiles(
             Pos2::new(tile.rect.x, tile.rect.y),
             Vec2::new(tile.rect.width, tile.rect.height),
         );
+        if tile.id == space_sniffer::map_items::COLLAPSED_ID {
+            out.push(DrawTile {
+                id,
+                rect: bounds,
+                container: false,
+                level: level + 1,
+                bytes: items.collapsed_bytes,
+                collapsed: items.collapsed_count,
+            });
+            continue;
+        }
         collect_tiles(
             tree,
             weights,
@@ -1122,4 +1190,176 @@ fn reveal(node: &Node) -> Result<(), String> {
     result
         .map(|_| ())
         .map_err(|error| format!("Could not reveal entry: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(extra: usize) -> ScanTree {
+        let root = std::path::absolute("test-root").unwrap();
+        let nodes = vec![
+            Node {
+                name: "test-root".into(),
+                path: root.clone(),
+                kind: EntryKind::Directory,
+                size: 30,
+                children: vec![1],
+                parent: None,
+                modified: None,
+            },
+            Node {
+                name: "nested".into(),
+                path: root.join("nested"),
+                kind: EntryKind::Directory,
+                size: 30,
+                children: vec![2, 3],
+                parent: Some(0),
+                modified: None,
+            },
+            Node {
+                name: "one.zip".into(),
+                path: root.join("nested/one.zip"),
+                kind: EntryKind::File,
+                size: 10,
+                children: vec![],
+                parent: Some(1),
+                modified: None,
+            },
+            Node {
+                name: "two.bin".into(),
+                path: root.join("nested/two.bin"),
+                kind: EntryKind::File,
+                size: 20,
+                children: vec![],
+                parent: Some(1),
+                modified: None,
+            },
+        ];
+        let mut tree = ScanTree {
+            nodes,
+            root: 0,
+            stats: ScanStats {
+                files: 2,
+                directories: 2,
+                ..Default::default()
+            },
+        };
+        for i in 0..extra {
+            let id = tree.nodes.len();
+            tree.nodes.push(Node {
+                name: format!("extra{i}.zip"),
+                path: root.join(format!("extra{i}.zip")),
+                kind: EntryKind::File,
+                size: 1,
+                children: vec![],
+                parent: Some(0),
+                modified: None,
+            });
+            tree.nodes[0].children.push(id);
+            tree.nodes[0].size += 1;
+            tree.stats.files += 1;
+        }
+        tree
+    }
+
+    #[test]
+    fn startup_has_no_demo_and_does_not_scan_without_a_root() {
+        let app = App::empty(egui::Context::default());
+        assert!(!app.loaded);
+        assert!(!app.loading);
+        assert!(app.live.is_none());
+        assert!(app.path.is_empty());
+        assert_eq!(app.model.tree.total_size(), 0);
+    }
+
+    #[test]
+    fn updates_preserve_zoom_selection_and_valid_filter() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(0)));
+        app.navigate(1);
+        app.selected = 2;
+        app.query = "*.zip".into();
+        app.apply_filter();
+        let path = app.model.tree.nodes[2].path.clone();
+        app.apply_changes(&[Change::Upsert {
+            path: path.clone(),
+            kind: EntryKind::File,
+            size: 50,
+            modified: None,
+        }]);
+        assert_eq!(app.model.tree.nodes[app.zoom].name, "nested");
+        assert_eq!(app.model.tree.nodes[app.selected].path, path);
+        assert_eq!(app.model.weights[app.zoom], 50);
+        assert_eq!(app.model.tree.total_size(), 70);
+        app.apply_changes(&[Change::Remove(path)]);
+        assert_eq!(app.model.tree.nodes[app.selected].name, "nested");
+        assert_eq!(app.model.weights[app.zoom], 0);
+    }
+
+    #[test]
+    fn resync_with_invalid_query_retains_last_valid_filter_and_navigation() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(0)));
+        app.navigate(1);
+        app.selected = 2;
+        app.query = "*.zip".into();
+        app.apply_filter();
+        app.query = ">oops".into();
+        app.apply_filter();
+        app.install_model(LiveTree::new(tree(100)));
+        assert_eq!(app.model.weights.len(), app.model.tree.nodes.len());
+        assert_eq!(app.model.weights[app.model.tree.root], 110);
+        assert!(app.filter_error.is_some());
+        assert_eq!(app.applied, "*.zip");
+        assert_eq!(app.model.tree.nodes[app.zoom].name, "nested");
+    }
+
+    #[test]
+    fn deleting_current_folder_returns_to_a_live_ancestor() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(0)));
+        app.navigate(1);
+        let path = app.model.tree.nodes[1].path.clone();
+        app.apply_changes(&[Change::Remove(path)]);
+        assert_eq!(app.zoom, app.model.tree.root);
+        assert_eq!(app.selected, app.model.tree.root);
+        assert_eq!(app.model.tree.total_size(), 0);
+    }
+
+    #[test]
+    fn content_writes_without_size_changes_keep_geometry_and_list_caches() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(0)));
+        let revision = app.revision;
+        let geometry = app.map_revision;
+        let path = app.model.tree.nodes[2].path.clone();
+        app.apply_changes(&[Change::Upsert {
+            path,
+            kind: EntryKind::File,
+            size: 10,
+            modified: Some(std::time::SystemTime::now()),
+        }]);
+        assert_eq!(app.map_revision, geometry);
+        assert_eq!(app.revision, revision);
+        assert!(app.updates > 0);
+    }
+
+    #[test]
+    fn changes_outside_the_zoomed_folder_leave_geometry_cached() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(1)));
+        app.navigate(1);
+        let geometry = app.map_revision;
+        let path = app.model.tree.nodes[4].path.clone();
+        app.apply_changes(&[Change::Upsert {
+            path,
+            kind: EntryKind::File,
+            size: 20,
+            modified: None,
+        }]);
+        assert_eq!(app.map_revision, geometry);
+        assert_eq!(app.model.tree.nodes[app.zoom].size, 30);
+        assert_eq!(app.model.tree.total_size(), 50);
+    }
 }
