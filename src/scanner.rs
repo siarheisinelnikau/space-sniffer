@@ -4,17 +4,20 @@
 //! links count once per path. Symbolic links and all Windows reparse points
 //! (including junctions) are represented as zero-byte leaves and never opened.
 
+use std::collections::VecDeque;
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use crate::model::{EntryKind, Node, NodeId, ScanStats, ScanTree};
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const CANCELLED: &str = "Scan cancelled";
+const DIRECTORY_BATCH_SIZE: usize = 512;
+const MAX_SCAN_WORKERS: usize = 8;
 
 #[derive(Clone, Debug, Default)]
 pub struct ScanProgress {
@@ -80,14 +83,33 @@ pub fn scan_path(path: &Path, cancel: &AtomicBool) -> Result<ScanTree, String> {
     scan_with_progress(path, cancel, |_| {})
 }
 
-fn scan_with_progress(
+/// Scan with bounded directory parallelism and progress on the calling thread.
+///
+/// The callback is never invoked by directory workers, so it need not be Send.
+/// Up to eight workers overlap directory I/O. SSDs and independent directories
+/// benefit most; parallel access is not always faster on spinning disks.
+pub fn scan_with_progress(
     path: &Path,
     cancel: &AtomicBool,
+    report: impl FnMut(ScanProgress),
+) -> Result<ScanTree, String> {
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(MAX_SCAN_WORKERS);
+    scan_with_worker_count(path, cancel, workers, report)
+}
+
+// Crate-visible for the standalone benchmark, without a second public scan API.
+pub(crate) fn scan_with_worker_count(
+    path: &Path,
+    cancel: &AtomicBool,
+    workers: usize,
     mut report: impl FnMut(ScanProgress),
 ) -> Result<ScanTree, String> {
     let started = Instant::now();
     check_cancelled(cancel)?;
-    // Make paths suitable for reveal/export without resolving symlinks.
+    // Make paths suitable for reveal/export without resolving root symlinks.
     let absolute_path = std::path::absolute(path)
         .map_err(|error| format!("Unable to resolve {}: {error}", path.display()))?;
     let path = absolute_path.as_path();
@@ -109,132 +131,30 @@ fn scan_with_progress(
             path.display()
         ));
     };
-
     let mut tree = ScanTree {
         nodes: vec![make_node(path.to_owned(), root_kind, &metadata, None)],
         root: 0,
         stats: ScanStats::default(),
     };
     let mut bytes = tree.nodes[0].size;
-    let mut pending = Vec::new();
     if root_kind == EntryKind::Directory {
         tree.stats.directories = 1;
-        pending.push(0);
     } else {
         tree.stats.files = 1;
     }
     report(progress(&tree.stats, bytes, path));
     let mut last_report = Instant::now();
-
-    while let Some(directory_id) = pending.pop() {
-        check_cancelled(cancel)?;
-        let directory_path = tree.nodes[directory_id].path.clone();
-        if last_report.elapsed() >= PROGRESS_INTERVAL {
-            report(progress(&tree.stats, bytes, &directory_path));
-            last_report = Instant::now();
-        }
-
-        // Recheck queued directories: a directory may have been replaced by a
-        // junction or link since its entry was first discovered.
-        let directory_metadata = match fs::symlink_metadata(&directory_path) {
-            Ok(metadata) => metadata,
-            Err(error) if directory_id == tree.root => {
-                return Err(format!(
-                    "Unable to inspect {}: {error}",
-                    directory_path.display()
-                ));
-            }
-            Err(_) => {
-                tree.stats.skipped = tree.stats.skipped.saturating_add(1);
-                continue;
-            }
-        };
-        if is_link(&directory_metadata) {
-            if directory_id == tree.root {
-                return Err(format!(
-                    "{} became a link or reparse point during the scan.",
-                    directory_path.display()
-                ));
-            }
-            tree.nodes[directory_id].kind = EntryKind::Symlink;
-            tree.stats.directories = tree.stats.directories.saturating_sub(1);
-            tree.stats.symlinks = tree.stats.symlinks.saturating_add(1);
-            continue;
-        }
-        if !directory_metadata.is_dir() {
-            if directory_id == tree.root {
-                return Err(format!(
-                    "{} is no longer a directory.",
-                    directory_path.display()
-                ));
-            }
-            tree.stats.skipped = tree.stats.skipped.saturating_add(1);
-            continue;
-        }
-
-        let entries = match fs::read_dir(&directory_path) {
-            Ok(entries) => entries,
-            Err(error) if directory_id == tree.root => {
-                return Err(format!(
-                    "Unable to read {}: {error}",
-                    directory_path.display()
-                ));
-            }
-            Err(_) => {
-                tree.stats.skipped = tree.stats.skipped.saturating_add(1);
-                continue;
-            }
-        };
-
-        for entry in entries {
-            check_cancelled(cancel)?;
-            if last_report.elapsed() >= PROGRESS_INTERVAL {
-                report(progress(&tree.stats, bytes, &directory_path));
-                last_report = Instant::now();
-            }
-
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => {
-                    tree.stats.skipped = tree.stats.skipped.saturating_add(1);
-                    continue;
-                }
-            };
-            let entry_path = entry.path();
-            let metadata = match fs::symlink_metadata(&entry_path) {
-                Ok(metadata) => metadata,
-                Err(_) => {
-                    tree.stats.skipped = tree.stats.skipped.saturating_add(1);
-                    continue;
-                }
-            };
-            let kind = if is_link(&metadata) {
-                tree.stats.symlinks = tree.stats.symlinks.saturating_add(1);
-                EntryKind::Symlink
-            } else if metadata.is_dir() {
-                tree.stats.directories = tree.stats.directories.saturating_add(1);
-                EntryKind::Directory
-            } else if metadata.is_file() {
-                tree.stats.files = tree.stats.files.saturating_add(1);
-                bytes = bytes.saturating_add(metadata.len());
-                EntryKind::File
-            } else {
-                tree.stats.skipped = tree.stats.skipped.saturating_add(1);
-                continue;
-            };
-
-            let node_id = tree.nodes.len();
-            tree.nodes
-                .push(make_node(entry_path, kind, &metadata, Some(directory_id)));
-            tree.nodes[directory_id].children.push(node_id);
-            if kind == EntryKind::Directory {
-                pending.push(node_id);
-            }
-        }
+    if root_kind == EntryKind::Directory {
+        scan_directories(
+            &mut tree,
+            &mut bytes,
+            cancel,
+            workers.clamp(1, MAX_SCAN_WORKERS),
+            &mut report,
+            &mut last_report,
+        )?;
     }
-
-    // Every child is inserted after its parent. Walking the arena backwards
-    // therefore aggregates even very deep directory trees without recursion.
+    // Children are inserted after parents, so reverse aggregation never recurses.
     for node_id in (0..tree.nodes.len()).rev() {
         check_cancelled(cancel)?;
         if last_report.elapsed() >= PROGRESS_INTERVAL {
@@ -250,19 +170,240 @@ fn scan_with_progress(
                 .then_with(|| tree.nodes[left].path.cmp(&tree.nodes[right].path))
         });
         tree.nodes[node_id].children = children;
-        if let Some(parent_id) = tree.nodes[node_id].parent {
-            tree.nodes[parent_id].size = tree.nodes[parent_id]
+        if let Some(parent) = tree.nodes[node_id].parent {
+            tree.nodes[parent].size = tree.nodes[parent]
                 .size
                 .saturating_add(tree.nodes[node_id].size);
         }
     }
-
     check_cancelled(cancel)?;
     tree.stats.elapsed = started.elapsed();
     report(progress(&tree.stats, bytes, path));
     Ok(tree)
 }
 
+struct DirectoryJob {
+    id: NodeId,
+    path: PathBuf,
+}
+struct DirectoryBatch {
+    worker: usize,
+    directory: NodeId,
+    nodes: Vec<Node>,
+    skipped: u64,
+    done: bool,
+    replaced_by_link: bool,
+    error: Option<String>,
+}
+impl DirectoryBatch {
+    fn new(worker: usize, directory: NodeId) -> Self {
+        Self {
+            worker,
+            directory,
+            nodes: Vec::new(),
+            skipped: 0,
+            done: false,
+            replaced_by_link: false,
+            error: None,
+        }
+    }
+}
+
+fn scan_directories(
+    tree: &mut ScanTree,
+    bytes: &mut u64,
+    cancel: &AtomicBool,
+    worker_count: usize,
+    report: &mut impl FnMut(ScanProgress),
+    last_report: &mut Instant,
+) -> Result<(), String> {
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        // Two bounded result batches per worker, one job per idle worker.
+        let (results, receiver) = mpsc::sync_channel(worker_count * 2);
+        let mut jobs = Vec::with_capacity(worker_count);
+        for worker in 0..worker_count {
+            let (sender, inbox) = mpsc::sync_channel(1);
+            let results = results.clone();
+            let stop = &stop;
+            let spawned = std::thread::Builder::new()
+                .name(format!("scan-directory-{worker}"))
+                .spawn_scoped(scope, move || {
+                    while let Ok(job) = inbox.recv() {
+                        if cancel.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if !read_directory(worker, job, cancel, stop, &results) {
+                            break;
+                        }
+                    }
+                });
+            match spawned {
+                Ok(_) => jobs.push(sender),
+                Err(error) if jobs.is_empty() => {
+                    return Err(format!("Unable to start directory scanning: {error}"));
+                }
+                Err(_) => break,
+            }
+        }
+        drop(results);
+        let outcome = (|| {
+            let mut pending = VecDeque::from([tree.root]);
+            let mut idle: Vec<_> = (0..jobs.len()).rev().collect();
+            let mut active = 0;
+            let mut current_path = tree.nodes[tree.root].path.clone();
+            while !pending.is_empty() || active > 0 {
+                check_cancelled(cancel)?;
+                while !pending.is_empty() && !idle.is_empty() {
+                    let directory = pending.pop_front().unwrap();
+                    let worker = idle.pop().unwrap();
+                    jobs[worker]
+                        .send(DirectoryJob {
+                            id: directory,
+                            path: tree.nodes[directory].path.clone(),
+                        })
+                        .map_err(|_| "Directory scan worker stopped unexpectedly".to_string())?;
+                    active += 1;
+                }
+                if last_report.elapsed() >= PROGRESS_INTERVAL {
+                    report(progress(&tree.stats, *bytes, &current_path));
+                    *last_report = Instant::now();
+                    check_cancelled(cancel)?;
+                }
+                let batch = match receiver.recv_timeout(PROGRESS_INTERVAL) {
+                    Ok(batch) => batch,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return Err("Directory scan workers stopped unexpectedly".into());
+                    }
+                };
+                current_path.clone_from(&tree.nodes[batch.directory].path);
+                if let Some(error) = batch.error {
+                    if batch.directory == tree.root {
+                        return Err(error);
+                    }
+                    tree.stats.skipped = tree.stats.skipped.saturating_add(1);
+                }
+                if batch.replaced_by_link {
+                    if batch.directory == tree.root {
+                        return Err(format!(
+                            "{} became a link or reparse point during the scan.",
+                            current_path.display()
+                        ));
+                    }
+                    tree.nodes[batch.directory].kind = EntryKind::Symlink;
+                    tree.stats.directories = tree.stats.directories.saturating_sub(1);
+                    tree.stats.symlinks = tree.stats.symlinks.saturating_add(1);
+                }
+                tree.stats.skipped = tree.stats.skipped.saturating_add(batch.skipped);
+                tree.nodes[batch.directory]
+                    .children
+                    .reserve(batch.nodes.len());
+                for node in batch.nodes {
+                    let node_id = tree.nodes.len();
+                    match node.kind {
+                        EntryKind::Directory => {
+                            tree.stats.directories = tree.stats.directories.saturating_add(1);
+                            pending.push_back(node_id);
+                        }
+                        EntryKind::File => {
+                            tree.stats.files = tree.stats.files.saturating_add(1);
+                            *bytes = bytes.saturating_add(node.size);
+                        }
+                        EntryKind::Symlink => {
+                            tree.stats.symlinks = tree.stats.symlinks.saturating_add(1);
+                        }
+                    }
+                    tree.nodes.push(node);
+                    tree.nodes[batch.directory].children.push(node_id);
+                }
+                if batch.done {
+                    active -= 1;
+                    idle.push(batch.worker);
+                }
+            }
+            Ok(())
+        })();
+        // Disconnect channels before joining, including cancellation/error paths.
+        // This unblocks workers publishing to a full results queue.
+        stop.store(true, Ordering::Relaxed);
+        drop(jobs);
+        drop(receiver);
+        outcome
+    })
+}
+
+fn read_directory(
+    worker: usize,
+    job: DirectoryJob,
+    cancel: &AtomicBool,
+    stop: &AtomicBool,
+    results: &SyncSender<DirectoryBatch>,
+) -> bool {
+    let mut batch = DirectoryBatch::new(worker, job.id);
+    // Recheck queued paths before enumeration: they may have become junctions.
+    let metadata = match fs::symlink_metadata(&job.path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            batch.done = true;
+            batch.error = Some(format!("Unable to inspect {}: {error}", job.path.display()));
+            return results.send(batch).is_ok();
+        }
+    };
+    if is_link(&metadata) {
+        batch.done = true;
+        batch.replaced_by_link = true;
+        return results.send(batch).is_ok();
+    }
+    if !metadata.is_dir() {
+        batch.done = true;
+        batch.error = Some(format!("{} is no longer a directory.", job.path.display()));
+        return results.send(batch).is_ok();
+    }
+    let entries = match fs::read_dir(&job.path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            batch.done = true;
+            batch.error = Some(format!("Unable to read {}: {error}", job.path.display()));
+            return results.send(batch).is_ok();
+        }
+    };
+    let mut visited = 0;
+    for entry in entries {
+        if cancel.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        // No link traversal. Windows reuses cached enumeration metadata here;
+        // Unix performs the equivalent of symlink_metadata for each entry.
+        let node = entry.and_then(|entry| {
+            let metadata = entry.metadata()?;
+            let kind = if is_link(&metadata) {
+                EntryKind::Symlink
+            } else if metadata.is_dir() {
+                EntryKind::Directory
+            } else if metadata.is_file() {
+                EntryKind::File
+            } else {
+                return Ok(None);
+            };
+            Ok(Some(make_node(entry.path(), kind, &metadata, Some(job.id))))
+        });
+        match node {
+            Ok(Some(node)) => batch.nodes.push(node),
+            Ok(None) | Err(_) => batch.skipped = batch.skipped.saturating_add(1),
+        }
+        visited += 1;
+        if visited == DIRECTORY_BATCH_SIZE {
+            if results.send(batch).is_err() {
+                return false;
+            }
+            batch = DirectoryBatch::new(worker, job.id);
+            visited = 0;
+        }
+    }
+    batch.done = true;
+    results.send(batch).is_ok()
+}
 fn make_node(path: PathBuf, kind: EntryKind, metadata: &Metadata, parent: Option<NodeId>) -> Node {
     Node {
         name: path
@@ -514,5 +655,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn parallel_batches_preserve_serial_results_and_parent_order() {
+        let directory = TestDirectory::new();
+        // Exceed one batch in the root, with enough independent directories
+        // to keep all workers occupied and results arriving in different orders.
+        for index in 0..520 {
+            fs::write(directory.0.join(format!("root-{index:04}.bin")), [0; 3]).unwrap();
+        }
+        for index in 0..12 {
+            let child = directory.0.join(format!("child-{index:02}"));
+            fs::create_dir(&child).unwrap();
+            for file in 0..40 {
+                fs::write(child.join(format!("file-{file:03}.bin")), [0; 7]).unwrap();
+            }
+        }
+        let cancel = AtomicBool::new(false);
+        let serial = scan_with_worker_count(&directory.0, &cancel, 1, |_| {}).unwrap();
+        let parallel = scan_with_worker_count(&directory.0, &cancel, 4, |_| {}).unwrap();
+        assert_eq!(serial.total_size(), 4_920);
+        assert_eq!(serial.stats.files, 1_000);
+        assert_eq!(parallel.stats.files, serial.stats.files);
+        assert_eq!(parallel.stats.directories, serial.stats.directories);
+        assert_eq!(parallel.total_size(), serial.total_size());
+        for node in &serial.nodes {
+            let other = parallel
+                .nodes
+                .iter()
+                .find(|other| other.path == node.path)
+                .unwrap();
+            assert_eq!((other.kind, other.size), (node.kind, node.size));
+            let paths = |tree: &ScanTree, node: &Node| {
+                node.children
+                    .iter()
+                    .map(|&id| tree.nodes[id].path.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(paths(&serial, node), paths(&parallel, other));
+        }
+        for (id, node) in parallel.nodes.iter().enumerate() {
+            assert!(node.parent.is_none_or(|parent| parent < id));
+        }
+    }
+
+    #[test]
+    fn callbacks_stay_on_the_caller_and_need_not_be_send() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let directory = TestDirectory::new();
+        let caller = std::thread::current().id();
+        let calls = Rc::new(Cell::new(0));
+        scan_with_worker_count(&directory.0, &AtomicBool::new(false), 4, |_| {
+            assert_eq!(std::thread::current().id(), caller);
+            calls.set(calls.get() + 1);
+        })
+        .unwrap();
+        assert!(calls.get() >= 2);
+    }
+
+    #[test]
+    fn cancellation_unblocks_a_worker_with_batches_in_flight() {
+        let directory = TestDirectory::new();
+        for index in 0..(DIRECTORY_BATCH_SIZE * 2 + 1) {
+            fs::write(directory.0.join(format!("file-{index:04}")), []).unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let cancel = &cancel;
+            let stop = &stop;
+            let path = directory.0.clone();
+            let worker = scope.spawn(move || {
+                read_directory(0, DirectoryJob { id: 0, path }, &cancel, &stop, &sender)
+            });
+            let batch = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(batch.nodes.len(), DIRECTORY_BATCH_SIZE);
+            assert!(!batch.done);
+            cancel.store(true, Ordering::Relaxed);
+            drop(receiver);
+            assert!(!worker.join().unwrap());
+        });
+    }
+
+    #[test]
+    fn deep_directories_do_not_require_recursive_traversal() {
+        let directory = TestDirectory::new();
+        let mut leaf = directory.0.clone();
+        for _ in 0..128 {
+            leaf.push("d");
+            fs::create_dir(&leaf).unwrap();
+        }
+        fs::write(leaf.join("leaf.bin"), [0; 11]).unwrap();
+        let tree = directory.scan();
+        assert_eq!(tree.stats.directories, 129);
+        assert_eq!(tree.total_size(), 11);
     }
 }
