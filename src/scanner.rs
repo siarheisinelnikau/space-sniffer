@@ -729,7 +729,7 @@ mod tests {
             let stop = &stop;
             let path = directory.0.clone();
             let worker = scope.spawn(move || {
-                read_directory(0, DirectoryJob { id: 0, path }, &cancel, &stop, &sender)
+                read_directory(0, DirectoryJob { id: 0, path }, cancel, stop, &sender)
             });
             let batch = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
             assert_eq!(batch.nodes.len(), DIRECTORY_BATCH_SIZE);
