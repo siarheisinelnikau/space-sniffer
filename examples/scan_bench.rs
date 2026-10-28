@@ -148,14 +148,12 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let (Ok(path), Ok(parent)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize())
+            && path.parent() == Some(parent.as_path())
+            && path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("space-sniffer-bench-"))
         {
-            if path.parent() == Some(parent.as_path())
-                && path
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("space-sniffer-bench-"))
-            {
-                let _ = fs::remove_dir_all(path);
-            }
+            let _ = fs::remove_dir_all(path);
         }
     }
 }
