@@ -2,9 +2,9 @@
 //! same incremental model used by the UI. No watcher events are fabricated.
 
 use space_sniffer::{
-    live::{Change, LiveEvent, LiveHandle, start_live},
+    live::{Change, LiveEvent, LiveHandle, start_live, start_live_with_wake},
     live_tree::LiveTree,
-    model::{EntryKind, ScanTree},
+    model::{EntryKind, Node, ScanStats, ScanTree},
     scanner::scan_path,
 };
 use std::{
@@ -12,7 +12,11 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -72,6 +76,33 @@ struct Entry {
 
 type Inventory = BTreeMap<PathBuf, Entry>;
 
+#[derive(Debug)]
+struct PreviewRecord {
+    start: usize,
+    count: usize,
+    bytes: u64,
+    drawable: bool,
+}
+
+fn seed_preview(mut root: Node) -> LiveTree {
+    assert!(root.parent.is_none());
+    assert!(root.children.is_empty());
+    let mut stats = ScanStats::default();
+    match root.kind {
+        EntryKind::Directory => {
+            root.size = 0;
+            stats.directories = 1;
+        }
+        EntryKind::File => stats.files = 1,
+        EntryKind::Symlink => stats.symlinks = 1,
+    }
+    LiveTree::new(ScanTree {
+        nodes: vec![root],
+        root: 0,
+        stats,
+    })
+}
+
 fn inventory(tree: &ScanTree) -> Inventory {
     let mut result = BTreeMap::new();
     let mut pending = vec![tree.root];
@@ -112,6 +143,9 @@ fn inventory(tree: &ScanTree) -> Inventory {
 struct Session {
     handle: LiveHandle,
     view: Option<LiveTree>,
+    ready_seen: bool,
+    previews: Vec<PreviewRecord>,
+    published_nodes: usize,
     statuses: Vec<String>,
     failures: Vec<String>,
     progress_seen: bool,
@@ -123,9 +157,16 @@ struct Session {
 
 impl Session {
     fn new(path: &Path) -> Self {
+        Self::from_handle(start_live(path.to_owned()))
+    }
+
+    fn from_handle(handle: LiveHandle) -> Self {
         Self {
-            handle: start_live(path.to_owned()),
+            handle,
             view: None,
+            ready_seen: false,
+            previews: Vec::new(),
+            published_nodes: 0,
             statuses: Vec::new(),
             failures: Vec::new(),
             progress_seen: false,
@@ -139,8 +180,56 @@ impl Session {
     fn receive(&mut self, timeout: Duration) {
         match self.handle.receiver.recv_timeout(timeout) {
             Ok(LiveEvent::Progress(_)) => self.progress_seen = true,
-            Ok(LiveEvent::Ready(view)) => self.view = Some(*view),
+            Ok(LiveEvent::Preview { start, nodes }) => {
+                assert!(!self.ready_seen, "a preview arrived after final Ready");
+                assert_eq!(start, self.published_nodes, "preview source IDs have a gap");
+                assert!(!nodes.is_empty() && nodes.len() <= 8192);
+                let count = nodes.len();
+                if start == 0 {
+                    assert_eq!(count, 1, "the first preview contains only the root");
+                    self.view = Some(seed_preview(nodes.into_iter().next().unwrap()));
+                } else {
+                    self.view
+                        .as_mut()
+                        .expect("preview nodes arrived before their root")
+                        .append_scan(start, nodes)
+                        .unwrap();
+                }
+                self.published_nodes += count;
+                let view = self.view();
+                let root = &view.tree.nodes[view.tree.root];
+                let items = space_sniffer::map_items::visible_items(
+                    &root.children,
+                    &view.weights,
+                    1_000_000.0,
+                    1024,
+                );
+                let tiles = space_sniffer::treemap::layout(
+                    &items.items,
+                    space_sniffer::treemap::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1000.0,
+                        height: 1000.0,
+                    },
+                );
+                let drawable = tiles
+                    .iter()
+                    .any(|tile| tile.rect.width > 0.0 && tile.rect.height > 0.0);
+                self.previews.push(PreviewRecord {
+                    start,
+                    count,
+                    bytes: self.view().tree.total_size(),
+                    drawable,
+                });
+            }
+            Ok(LiveEvent::Ready(view)) => {
+                assert!(!self.ready_seen, "initial Ready must be emitted once");
+                self.ready_seen = true;
+                self.view = Some(*view);
+            }
             Ok(LiveEvent::Changes(changes)) => {
+                assert!(self.ready_seen, "native changes arrived before final Ready");
                 self.batches += 1;
                 for change in &changes {
                     match change {
@@ -187,7 +276,7 @@ impl Session {
     }
 
     fn ready(&mut self) {
-        self.until("initial scan", |session| session.view.is_some());
+        self.until("final initial-scan Ready", |session| session.ready_seen);
         assert!(self.failures.is_empty(), "{:?}", self.failures);
     }
 
@@ -454,6 +543,132 @@ fn writes_during_the_initial_scan_are_reconciled_without_a_manual_rescan() {
     writer.join().unwrap();
     session.agrees_with_disk(&directory.0);
     assert_eq!(session.view().tree.stats.files, 512);
+    assert!(session.previews.iter().any(|preview| preview.bytes > 0));
+}
+
+#[test]
+fn initial_previews_produce_real_map_tiles_before_the_authoritative_tree() {
+    let directory = Directory::new();
+    // More than one maximum-size chunk, independent of scan throughput.
+    for entry in 0..10_240 {
+        file(&directory.child(&format!("f{entry:05}.bin")), 17);
+    }
+    let expected_nodes = 1 + 10_240;
+    let mut session = Session::new(&directory.0);
+    session.until("real bytes drawable in a preview", |session| {
+        session
+            .previews
+            .iter()
+            .any(|preview| preview.bytes > 0 && preview.drawable)
+    });
+    assert!(!session.ready_seen, "partial tiles must precede Ready");
+    assert!(session.view().tree.nodes.len() < expected_nodes);
+    assert!(session.view().tree.total_size() < 10_240 * 17);
+    inventory(&session.view().tree);
+
+    session.ready();
+    session.agrees_with_disk(&directory.0);
+    assert_eq!(session.view().tree.nodes.len(), expected_nodes);
+    assert!(session.previews.len() >= 3, "{:?}", session.previews);
+    assert_eq!(session.previews[0].start, 0);
+    assert_eq!(session.previews[0].count, 1);
+    assert!(session.published_nodes <= expected_nodes);
+    let mut cursor = 0;
+    for preview in &session.previews {
+        assert_eq!(preview.start, cursor);
+        assert!(preview.count <= 8192);
+        cursor += preview.count;
+    }
+}
+
+struct WorkerExit(mpsc::SyncSender<()>);
+
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
+    }
+}
+
+#[test]
+fn dropping_and_switching_during_a_preview_stops_the_old_worker() {
+    let directory = Directory::new();
+    let first = directory.child("first");
+    let second = directory.child("second");
+    for index in 0..1024 {
+        file(&first.join(format!("old-{index:04}.bin")), 7);
+    }
+    file(&second.join("new.bin"), 23);
+    let (exited, exit_receiver) = mpsc::sync_channel(1);
+    let worker_exit = WorkerExit(exited);
+    let handle = start_live_with_wake(first.clone(), move || {
+        // This guard is owned by the worker's wake callback and drops only
+        // after its final callback reference has been released.
+        let _keep_alive = &worker_exit;
+    });
+    let mut old = Session::from_handle(handle);
+    old.until("root preview", |session| !session.previews.is_empty());
+    assert!(!old.ready_seen);
+    assert_eq!(old.view().tree.nodes[0].path, first);
+    let cancel = Arc::clone(&old.handle.cancel);
+    drop(old);
+    assert!(cancel.load(Ordering::Relaxed));
+    exit_receiver
+        .recv_timeout(TIMEOUT)
+        .expect("the cancelled preview worker must terminate");
+
+    let mut current = Session::new(&second);
+    current.ready();
+    session_assert_new_root(&mut current, &second, &first);
+    assert!(
+        current
+            .view()
+            .tree
+            .nodes
+            .iter()
+            .all(|node| node.path.starts_with(&second))
+    );
+}
+
+#[test]
+fn a_full_output_queue_does_not_prevent_worker_cancellation() {
+    let directory = Directory::new();
+    let changed = directory.child("changing.bin");
+    file(&changed, 1);
+    let (exited, exit_receiver) = mpsc::sync_channel(1);
+    let worker_exit = WorkerExit(exited);
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let callback_wakes = Arc::clone(&wakes);
+    let (pulses, pulse_receiver) = mpsc::sync_channel(1);
+    let handle = start_live_with_wake(directory.0.clone(), move || {
+        let _keep_alive = &worker_exit;
+        callback_wakes.fetch_add(1, Ordering::Relaxed);
+        let _ = pulses.try_send(());
+    });
+    let mut session = Session::from_handle(handle);
+    session.ready();
+    // Stop consuming the output. More than eight subsequent wake attempts
+    // prove that the eight-event output queue has become full: delivery wakes
+    // and blocked-send retries both use this callback.
+    let target = wakes.load(Ordering::Relaxed) + 9;
+    let mut size = 2;
+    while wakes.load(Ordering::Relaxed) < target {
+        OpenOptions::new()
+            .write(true)
+            .open(&changed)
+            .unwrap()
+            .set_len(size)
+            .unwrap();
+        size += 1;
+        pulse_receiver
+            .recv_timeout(TIMEOUT)
+            .expect("native changes must reach the stalled output queue");
+    }
+    let cancel = Arc::clone(&session.handle.cancel);
+    drop(session);
+    assert!(cancel.load(Ordering::Relaxed));
+    exit_receiver
+        .recv_timeout(TIMEOUT)
+        .expect("a full event queue must not strand the worker");
 }
 
 #[test]
