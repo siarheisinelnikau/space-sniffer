@@ -144,11 +144,7 @@ fn scan_impl<const OBSERVE: bool, O: FnMut(&ScanTree)>(
     observe: O,
 ) -> Result<ScanTree, String> {
     let started = Instant::now();
-    let mut observer = ScanObserver::<OBSERVE, _> {
-        callback: observe,
-        last: started,
-        first_batch: true,
-    };
+    let mut observer = ScanObserver::<OBSERVE, _>::new(observe);
     check_cancelled(cancel)?;
     // Make paths suitable for reveal/export without resolving root symlinks.
     let absolute_path = std::path::absolute(path)
@@ -187,7 +183,7 @@ fn scan_impl<const OBSERVE: bool, O: FnMut(&ScanTree)>(
     check_cancelled(cancel)?;
     observer.emit(&tree, cancel)?;
     let mut last_report = Instant::now();
-    if root_kind == EntryKind::Directory {
+    let directories = if root_kind == EntryKind::Directory {
         scan_directories(
             &mut tree,
             &mut bytes,
@@ -196,27 +192,16 @@ fn scan_impl<const OBSERVE: bool, O: FnMut(&ScanTree)>(
             &mut report,
             &mut last_report,
             &mut observer,
-        )?;
-    }
-    // Children are inserted after parents, so reverse aggregation never recurses.
-    for node_id in (0..tree.nodes.len()).rev() {
-        check_cancelled(cancel)?;
+        )?
+    } else {
+        Vec::new()
+    };
+    finalize_tree(&mut tree, &directories, cancel, &mut observer, |tree| {
         if last_report.elapsed() >= PROGRESS_INTERVAL {
             report(progress(&tree.stats, bytes, path));
             last_report = Instant::now();
         }
-        if node_id % 256 == 0 {
-            observer.tick(&tree, cancel)?;
-        }
-        let mut children = std::mem::take(&mut tree.nodes[node_id].children);
-        sort_children(&tree, &mut children, &mut observer, cancel)?;
-        tree.nodes[node_id].children = children;
-        if let Some(parent) = tree.nodes[node_id].parent {
-            tree.nodes[parent].size = tree.nodes[parent]
-                .size
-                .saturating_add(tree.nodes[node_id].size);
-        }
-    }
+    })?;
     check_cancelled(cancel)?;
     tree.stats.elapsed = started.elapsed();
     observer.emit(&tree, cancel)?;
@@ -225,13 +210,51 @@ fn scan_impl<const OBSERVE: bool, O: FnMut(&ScanTree)>(
     Ok(tree)
 }
 
-struct ScanObserver<const ENABLED: bool, O> {
+// Also used by the standalone synthetic scale benchmark. File bytes have
+// already been folded into their immediate directory during batch merging.
+pub(crate) fn finalize_tree<const OBSERVE: bool, O: FnMut(&ScanTree)>(
+    tree: &mut ScanTree,
+    directories: &[NodeId],
+    cancel: &AtomicBool,
+    observer: &mut ScanObserver<OBSERVE, O>,
+    mut heartbeat: impl FnMut(&ScanTree),
+) -> Result<(), String> {
+    // Directory IDs preserve parent-before-child discovery order. Most entries
+    // are files, so there is no second per-file metadata-arena walk here.
+    for &node_id in directories.iter().rev() {
+        check_cancelled(cancel)?;
+        if !tree.nodes[node_id].is_dir() {
+            continue; // A queued directory may have become a reparse point.
+        }
+        heartbeat(tree);
+        observer.tick(tree, cancel)?;
+        let mut children = std::mem::take(&mut tree.nodes[node_id].children);
+        sort_children(tree, &mut children, observer, cancel)?;
+        tree.nodes[node_id].children = children;
+        if let Some(parent) = tree.nodes[node_id].parent {
+            tree.nodes[parent].size = tree.nodes[parent]
+                .size
+                .saturating_add(tree.nodes[node_id].size);
+        }
+    }
+    check_cancelled(cancel)?;
+    Ok(())
+}
+
+pub(crate) struct ScanObserver<const ENABLED: bool, O> {
     callback: O,
     last: Instant,
     first_batch: bool,
 }
 
 impl<const ENABLED: bool, O: FnMut(&ScanTree)> ScanObserver<ENABLED, O> {
+    pub(crate) fn new(callback: O) -> Self {
+        Self {
+            callback,
+            last: Instant::now(),
+            first_batch: true,
+        }
+    }
     fn emit(&mut self, tree: &ScanTree, cancel: &AtomicBool) -> Result<(), String> {
         if ENABLED {
             (self.callback)(tree);
@@ -268,28 +291,91 @@ fn node_order(tree: &ScanTree, left: NodeId, right: NodeId) -> std::cmp::Orderin
 
 fn sort_children<const OBSERVE: bool, O: FnMut(&ScanTree)>(
     tree: &ScanTree,
-    children: &mut Vec<NodeId>,
+    children: &mut [NodeId],
     observer: &mut ScanObserver<OBSERVE, O>,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    if !OBSERVE || children.len() <= SORT_RUN_SIZE * 4 {
+    if children.len() <= SORT_RUN_SIZE * 4 {
         children.sort_unstable_by(|&left, &right| node_order(tree, left, right));
         return Ok(());
     }
-    // Exceptionally wide directories can otherwise spend many preview
-    // intervals in a single opaque sort. Sort bounded runs, then merge with
-    // cancellation/observer checkpoints. The no-observer path above is intact.
-    for run in children.chunks_mut(SORT_RUN_SIZE) {
+    // Enumeration is often already ordered when siblings have equal sizes.
+    // Avoid the observed merge sort's passes and scratch allocation entirely.
+    let mut ordered = true;
+    for (index, pair) in children.windows(2).enumerate() {
+        if index % 4096 == 0 {
+            check_cancelled(cancel)?;
+            observer.tick(tree, cancel)?;
+        }
+        if node_order(tree, pair[0], pair[1]).is_gt() {
+            ordered = false;
+            break;
+        }
+    }
+    if ordered {
+        return Ok(());
+    }
+
+    // Sorting IDs directly repeatedly loads size fields from distant, much
+    // larger Nodes. Cache only the hot weight and ID (16 bytes), retaining the
+    // name/path tie-break contract without copying either string.
+    let mut sorted = Vec::with_capacity(children.len());
+    for chunk in children.chunks(8192) {
         check_cancelled(cancel)?;
-        run.sort_unstable_by(|&left, &right| node_order(tree, left, right));
+        sorted.extend(chunk.iter().map(|&id| SortItem {
+            id,
+            size: tree.nodes[id].size,
+        }));
         observer.tick(tree, cancel)?;
     }
-    let mut scratch = vec![0; children.len()];
+    if !OBSERVE {
+        sorted.sort_unstable_by(|left, right| sort_item_order(tree, left, right));
+    } else {
+        sort_observed_items(tree, &mut sorted, observer, cancel)?;
+    }
+    for (destination, source) in children.chunks_mut(8192).zip(sorted.chunks(8192)) {
+        check_cancelled(cancel)?;
+        for (destination, source) in destination.iter_mut().zip(source) {
+            *destination = source.id;
+        }
+        observer.tick(tree, cancel)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct SortItem {
+    id: NodeId,
+    size: u64,
+}
+
+fn sort_item_order(tree: &ScanTree, left: &SortItem, right: &SortItem) -> std::cmp::Ordering {
+    right
+        .size
+        .cmp(&left.size)
+        .then_with(|| tree.nodes[left.id].name.cmp(&tree.nodes[right.id].name))
+        .then_with(|| tree.nodes[left.id].path.cmp(&tree.nodes[right.id].path))
+}
+
+fn sort_observed_items<const OBSERVE: bool, O: FnMut(&ScanTree)>(
+    tree: &ScanTree,
+    sorted: &mut Vec<SortItem>,
+    observer: &mut ScanObserver<OBSERVE, O>,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    // Bounded runs/merge checkpoints keep large sorts cancellable and let
+    // preview consumers publish additional prefixes before Ready.
+    for run in sorted.chunks_mut(SORT_RUN_SIZE) {
+        check_cancelled(cancel)?;
+        run.sort_unstable_by(|left, right| sort_item_order(tree, left, right));
+        observer.tick(tree, cancel)?;
+    }
+    let mut scratch = vec![SortItem { id: 0, size: 0 }; sorted.len()];
     let mut width = SORT_RUN_SIZE;
-    while width < children.len() {
-        for start in (0..children.len()).step_by(width * 2) {
-            let middle = (start + width).min(children.len());
-            let end = (middle + width).min(children.len());
+    while width < sorted.len() {
+        for start in (0..sorted.len()).step_by(width * 2) {
+            let middle = (start + width).min(sorted.len());
+            let end = (middle + width).min(sorted.len());
             let (mut left, mut right) = (start, middle);
             for (offset, destination) in scratch[start..end].iter_mut().enumerate() {
                 if offset % 4096 == 0 {
@@ -297,17 +383,18 @@ fn sort_children<const OBSERVE: bool, O: FnMut(&ScanTree)>(
                     observer.tick(tree, cancel)?;
                 }
                 if left < middle
-                    && (right == end || !node_order(tree, children[left], children[right]).is_gt())
+                    && (right == end
+                        || !sort_item_order(tree, &sorted[left], &sorted[right]).is_gt())
                 {
-                    *destination = children[left];
+                    *destination = sorted[left];
                     left += 1;
                 } else {
-                    *destination = children[right];
+                    *destination = sorted[right];
                     right += 1;
                 }
             }
         }
-        std::mem::swap(children, &mut scratch);
+        std::mem::swap(sorted, &mut scratch);
         width *= 2;
     }
     Ok(())
@@ -348,7 +435,7 @@ fn scan_directories<const OBSERVE: bool, O: FnMut(&ScanTree)>(
     report: &mut impl FnMut(ScanProgress),
     last_report: &mut Instant,
     observer: &mut ScanObserver<OBSERVE, O>,
-) -> Result<(), String> {
+) -> Result<Vec<NodeId>, String> {
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         // Two bounded result batches per worker, one job per idle worker.
@@ -381,6 +468,7 @@ fn scan_directories<const OBSERVE: bool, O: FnMut(&ScanTree)>(
         drop(results);
         let outcome = (|| {
             let mut pending = VecDeque::from([tree.root]);
+            let mut directories = vec![tree.root];
             let mut idle: Vec<_> = (0..jobs.len()).rev().collect();
             let mut active = 0;
             let mut current_path = tree.nodes[tree.root].path.clone();
@@ -433,16 +521,19 @@ fn scan_directories<const OBSERVE: bool, O: FnMut(&ScanTree)>(
                     .children
                     .reserve(batch.nodes.len());
                 let nonempty = !batch.nodes.is_empty();
+                let mut direct_bytes = 0_u64;
                 for node in batch.nodes {
                     let node_id = tree.nodes.len();
                     match node.kind {
                         EntryKind::Directory => {
                             tree.stats.directories = tree.stats.directories.saturating_add(1);
                             pending.push_back(node_id);
+                            directories.push(node_id);
                         }
                         EntryKind::File => {
                             tree.stats.files = tree.stats.files.saturating_add(1);
                             *bytes = bytes.saturating_add(node.size);
+                            direct_bytes = direct_bytes.saturating_add(node.size);
                         }
                         EntryKind::Symlink => {
                             tree.stats.symlinks = tree.stats.symlinks.saturating_add(1);
@@ -451,6 +542,9 @@ fn scan_directories<const OBSERVE: bool, O: FnMut(&ScanTree)>(
                     tree.nodes.push(node);
                     tree.nodes[batch.directory].children.push(node_id);
                 }
+                tree.nodes[batch.directory].size = tree.nodes[batch.directory]
+                    .size
+                    .saturating_add(direct_bytes);
                 if nonempty {
                     observer.batch(tree, cancel)?;
                 }
@@ -459,7 +553,7 @@ fn scan_directories<const OBSERVE: bool, O: FnMut(&ScanTree)>(
                     idle.push(batch.worker);
                 }
             }
-            Ok(())
+            Ok(directories)
         })();
         // Disconnect channels before joining, including cancellation/error paths.
         // This unblocks workers publishing to a full results queue.
@@ -922,7 +1016,10 @@ mod tests {
                 }
                 if callbacks.get() == 2 {
                     assert_eq!(partial.stats.files, DIRECTORY_BATCH_SIZE as u64);
-                    assert_eq!(partial.nodes[partial.root].size, 0);
+                    assert_eq!(
+                        partial.nodes[partial.root].size,
+                        DIRECTORY_BATCH_SIZE as u64 * 3
+                    );
                 }
             },
         )
@@ -974,7 +1071,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(empty_lengths, [1, 1]);
+        assert!(empty_lengths.len() >= 2);
+        assert!(empty_lengths.iter().all(|&length| length == 1));
         let file = directory.0.join("file.bin");
         fs::write(&file, [0; 9]).unwrap();
         let mut sizes = Vec::new();
@@ -1031,6 +1129,87 @@ mod tests {
         };
         assert_eq!(
             sort_children(&tree, &mut observed, &mut observer, &cancel).unwrap_err(),
+            CANCELLED
+        );
+    }
+
+    #[test]
+    fn directory_only_finalization_preserves_saturation_and_reclassified_links() {
+        let make = |name: &str, kind, size, parent| Node {
+            name: name.into(),
+            path: PathBuf::from(name),
+            kind,
+            size,
+            parent,
+            children: Vec::new(),
+            modified: None,
+        };
+        let mut tree = ScanTree {
+            nodes: vec![
+                make("root", EntryKind::Directory, u64::MAX - 2, None),
+                make("nested", EntryKind::Directory, 7, Some(0)),
+                make("large.bin", EntryKind::File, u64::MAX - 2, Some(0)),
+                make("nested/data.bin", EntryKind::File, 7, Some(1)),
+                make("reclassified-link", EntryKind::Symlink, 0, Some(0)),
+            ],
+            root: 0,
+            stats: ScanStats::default(),
+        };
+        tree.nodes[0].children = vec![4, 1, 2];
+        tree.nodes[1].children = vec![3];
+        finalize_tree(
+            &mut tree,
+            &[0, 1, 4],
+            &AtomicBool::new(false),
+            &mut ScanObserver::<false, _>::new(|_| {}),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(tree.total_size(), u64::MAX);
+        assert_eq!(tree.nodes[1].size, 7);
+        assert_eq!(tree.nodes[4].size, 0);
+        assert_eq!(tree.nodes[0].children, [2, 1, 4]);
+    }
+
+    #[test]
+    fn ordered_wide_siblings_keep_observer_and_cancellation_checkpoints() {
+        let count = SORT_RUN_SIZE * 4 + 1;
+        let nodes = (0..count)
+            .map(|id| Node {
+                name: format!("file-{id:07}"),
+                path: PathBuf::from(format!("file-{id:07}")),
+                kind: EntryKind::File,
+                size: 1024,
+                parent: None,
+                children: Vec::new(),
+                modified: None,
+            })
+            .collect();
+        let tree = ScanTree {
+            nodes,
+            root: 0,
+            stats: ScanStats::default(),
+        };
+        let mut children: Vec<_> = (0..count).collect();
+        let cancel = AtomicBool::new(false);
+        let mut calls = 0;
+        let mut observer = ScanObserver::<true, _> {
+            callback: |_: &ScanTree| {
+                calls += 1;
+            },
+            last: Instant::now() - PROGRESS_INTERVAL,
+            first_batch: false,
+        };
+        sort_children(&tree, &mut children, &mut observer, &cancel).unwrap();
+        assert!(calls >= 1);
+        assert!(children.iter().copied().eq(0..count));
+        let mut observer = ScanObserver::<true, _> {
+            callback: |_: &ScanTree| cancel.store(true, Ordering::Relaxed),
+            last: Instant::now() - PROGRESS_INTERVAL,
+            first_batch: false,
+        };
+        assert_eq!(
+            sort_children(&tree, &mut children, &mut observer, &cancel).unwrap_err(),
             CANCELLED
         );
     }
