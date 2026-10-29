@@ -12,7 +12,7 @@ use crate::{
 };
 use std::{
     cmp::Ordering,
-    collections::HashMap,
+    collections::{BinaryHeap, HashMap, HashSet},
     path::{Component, Path, PathBuf},
     time::SystemTime,
 };
@@ -29,12 +29,16 @@ pub struct UpdateSummary {
 pub struct LiveTree {
     pub tree: ScanTree,
     pub weights: Vec<u64>,
-    index: HashMap<PathBuf, NodeId>,
+    // Keys have already been normalized; hashing their raw platform strings
+    // avoids reparsing every Path component on each index operation.
+    index: HashMap<std::ffi::OsString, NodeId>,
     alive: Vec<bool>,
     free: Vec<NodeId>,
     retired: Vec<NodeId>,
     filter: Filter,
     root_key: PathBuf,
+    scan_append_ordered: bool,
+    preview_unsorted: bool,
     // A baseline scan only has a global skipped count. Its unattributed skips
     // remain at the root until root resync; later subtree counts are tracked.
     skipped: HashMap<NodeId, u64>,
@@ -57,11 +61,21 @@ impl LiveTree {
                 continue;
             }
             alive[id] = true;
-            index.insert(path_key(&tree.nodes[id].path), id);
+            index.insert(path_key(&tree.nodes[id].path).into_os_string(), id);
             weights[id] = tree.nodes[id].size;
             stack.extend(tree.nodes[id].children.iter().copied());
         }
         let skipped = HashMap::from([(tree.root, tree.stats.skipped)]);
+        let scan_append_ordered = tree.root == 0
+            && index.len() == tree.nodes.len()
+            && tree.nodes.iter().enumerate().all(|(id, node)| {
+                if id == tree.root {
+                    node.parent.is_none()
+                } else {
+                    node.parent
+                        .is_some_and(|parent| parent < id && tree.nodes[parent].is_dir())
+                }
+            });
         Self {
             tree,
             weights,
@@ -71,12 +85,14 @@ impl LiveTree {
             retired: Vec::new(),
             filter: Filter::default(),
             root_key,
+            scan_append_ordered,
+            preview_unsorted: false,
             skipped,
         }
     }
 
     pub fn find(&self, path: &Path) -> Option<NodeId> {
-        self.index.get(&path_key(path)).copied()
+        self.index.get(path_key(path).as_os_str()).copied()
     }
 
     pub fn contains(&self, id: NodeId) -> bool {
@@ -102,8 +118,194 @@ impl LiveTree {
         Ok(())
     }
 
+    /// Append at most 8,192 discovery-order nodes from the initial scanner.
+    ///
+    /// The seed root must already exist. IDs are dense and parents precede
+    /// children. Input children must be empty; directory and link sizes must
+    /// be zero. The entire chunk is checked before any model state changes.
+    /// File sizes and active filter weights are folded through new nodes and
+    /// affected existing ancestors in batches, without sorting siblings.
+    ///
+    /// Preview children stay in discovery order. Normally final Ready replaces
+    /// this model with the sorted scan. Calling apply before that is safe but
+    /// sorts the preview once and permanently ends its append-only phase.
+    pub fn append_scan(&mut self, start: usize, nodes: Vec<Node>) -> Result<UpdateSummary, String> {
+        if start != self.tree.nodes.len() {
+            return Err(format!(
+                "Preview chunk starts at {start}; expected {}.",
+                self.tree.nodes.len()
+            ));
+        }
+        if nodes.len() > 8192 {
+            return Err("A preview chunk cannot contain more than 8192 entries.".into());
+        }
+        if nodes.is_empty() {
+            return Ok(UpdateSummary::default());
+        }
+        if !self.scan_append_ordered {
+            return Err("Preview chunks require an append-only initial scan model.".into());
+        }
+        let end = start
+            .checked_add(nodes.len())
+            .ok_or_else(|| "Preview entry indices overflowed.".to_string())?;
+
+        let mut keys = Vec::with_capacity(nodes.len());
+        let mut existing_parents: HashMap<NodeId, PathBuf> = HashMap::new();
+        for (offset, node) in nodes.iter().enumerate() {
+            let id = start + offset;
+            let fail = |message: &str| format!("Preview entry {id}: {message}");
+            if !node.children.is_empty() {
+                return Err(fail(
+                    "children must be empty until their own chunks arrive.",
+                ));
+            }
+            if node.kind != EntryKind::File && node.size != 0 {
+                return Err(fail("directory and link sizes must start at zero."));
+            }
+            let parent = node
+                .parent
+                .ok_or_else(|| fail("only the separately initialized root can have no parent."))?;
+            if parent >= id {
+                return Err(fail("the parent must precede its child."));
+            }
+            let (parent_path, parent_key) = if parent < start {
+                if !self.contains(parent) || !self.tree.nodes[parent].is_dir() {
+                    return Err(fail("the parent must be an existing directory."));
+                }
+                let key = match existing_parents.entry(parent) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let key = path_key(&self.tree.nodes[parent].path);
+                        if !key.starts_with(&self.root_key) {
+                            return Err(fail("the parent is outside the selected root."));
+                        }
+                        entry.insert(key)
+                    }
+                };
+                (self.tree.nodes[parent].path.as_path(), &*key)
+            } else {
+                if !nodes[parent - start].is_dir() {
+                    return Err(fail("a file or link cannot have children."));
+                }
+                (nodes[parent - start].path.as_path(), &keys[parent - start])
+            };
+            // Scanner children normally reuse their parent's exact path
+            // spelling. Reuse that validated normalized prefix rather than
+            // allocating and normalizing the whole absolute path per file.
+            // Alias/case/extended-prefix spellings still use the full check.
+            let (key, direct_child) = match (node.path.parent(), node.path.file_name()) {
+                (Some(actual_parent), Some(name))
+                    if actual_parent.as_os_str() == parent_path.as_os_str() =>
+                {
+                    (child_key(parent_key, name), true)
+                }
+                _ => (path_key(&node.path), false),
+            };
+            if !direct_child
+                && (key == self.root_key
+                    || !key.starts_with(&self.root_key)
+                    || key.parent() != Some(parent_key.as_path()))
+            {
+                return Err(fail("the path must be directly inside its indexed parent."));
+            }
+            keys.push(key);
+        }
+        let mut unique = HashSet::with_capacity(nodes.len());
+        for (offset, key) in keys.iter().enumerate() {
+            if self.index.contains_key(key.as_os_str()) || !unique.insert(key.as_os_str()) {
+                return Err(format!(
+                    "Preview entry {}: the path is already present in this scan.",
+                    start + offset
+                ));
+            }
+        }
+        drop(unique);
+        drop(existing_parents);
+
+        // Geometric arena/index growth is amortized; no existing entries are
+        // revisited or reindexed for each preview chunk.
+        self.tree.nodes.reserve(nodes.len());
+        self.weights.reserve(nodes.len());
+        self.alive.reserve(nodes.len());
+        self.index.reserve(nodes.len());
+        let mut summary = UpdateSummary {
+            changed: nodes.len(),
+            inspected: nodes.len() * 2,
+        };
+        for (offset, (node, key)) in nodes.into_iter().zip(keys).enumerate() {
+            let id = start + offset;
+            let parent = node.parent.expect("the complete chunk was validated");
+            let weight = if self.filter.matches(&node) {
+                node.size
+            } else {
+                0
+            };
+            self.count(node.kind, true);
+            self.tree.nodes.push(node);
+            self.weights.push(weight);
+            self.alive.push(true);
+            self.index.insert(key.into_os_string(), id);
+            self.tree.nodes[parent].children.push(id);
+        }
+
+        let mut deltas: HashMap<NodeId, (u64, u64)> = HashMap::new();
+        let mut ancestors = BinaryHeap::new();
+        for id in (start..end).rev() {
+            let parent = self.tree.nodes[id].parent.expect("validated parent");
+            let delta = (self.tree.nodes[id].size, self.weights[id]);
+            if parent >= start {
+                self.tree.nodes[parent].size = self.tree.nodes[parent].size.saturating_add(delta.0);
+                self.weights[parent] = self.weights[parent].saturating_add(delta.1);
+            } else {
+                let entry = deltas.entry(parent).or_insert_with(|| {
+                    ancestors.push(parent);
+                    (0, 0)
+                });
+                entry.0 = entry.0.saturating_add(delta.0);
+                entry.1 = entry.1.saturating_add(delta.1);
+            }
+        }
+        // Existing parents also precede children in this initial-scan phase.
+        // Processing highest IDs first merges shared ancestry before visiting
+        // it, so a flat chunk touches the old root exactly once.
+        while let Some(id) = ancestors.pop() {
+            let delta = deltas.remove(&id).expect("one queued entry per ancestor");
+            summary.inspected += 1;
+            self.tree.nodes[id].size = self.tree.nodes[id].size.saturating_add(delta.0);
+            self.weights[id] = self.weights[id].saturating_add(delta.1);
+            if let Some(parent) = self.tree.nodes[id].parent {
+                let entry = deltas.entry(parent).or_insert_with(|| {
+                    ancestors.push(parent);
+                    (0, 0)
+                });
+                entry.0 = entry.0.saturating_add(delta.0);
+                entry.1 = entry.1.saturating_add(delta.1);
+            }
+        }
+        self.preview_unsorted = true;
+        Ok(summary)
+    }
+
     pub fn apply(&mut self, changes: &[Change]) -> UpdateSummary {
         let mut summary = UpdateSummary::default();
+        if !changes.is_empty() {
+            self.scan_append_ordered = false;
+            if self.preview_unsorted {
+                // Native changes normally start after sorted final Ready. A
+                // direct caller can nevertheless transition a preview safely.
+                for id in 0..self.tree.nodes.len() {
+                    if self.contains(id) && self.tree.nodes[id].is_dir() {
+                        let mut children = std::mem::take(&mut self.tree.nodes[id].children);
+                        children.sort_unstable_by(|&left, &right| {
+                            summary.inspected += 1;
+                            compare(&self.tree.nodes[left], &self.tree.nodes[right])
+                        });
+                        self.tree.nodes[id].children = children;
+                    }
+                }
+                self.preview_unsorted = false;
+            }
+        }
         for change in changes {
             match change {
                 Change::Upsert {
@@ -239,14 +441,14 @@ impl LiveTree {
         if !key.starts_with(&self.root_key) {
             return None;
         }
-        if let Some(&id) = self.index.get(&key) {
+        if let Some(&id) = self.index.get(key.as_os_str()) {
             return self.tree.nodes[id].is_dir().then_some(id);
         }
         // Ancestors absent from a coalesced event batch may be inserted as
         // empty directories. Never turn an existing file/link into a parent.
         self.upsert(parent, EntryKind::Directory, 0, None, summary);
         self.index
-            .get(&key)
+            .get(key.as_os_str())
             .copied()
             .filter(|&id| self.tree.nodes[id].is_dir())
     }
@@ -264,7 +466,7 @@ impl LiveTree {
             return;
         }
         summary.inspected += 1;
-        let existing = self.index.get(&key).copied();
+        let existing = self.index.get(key.as_os_str()).copied();
         let parent = if key == self.root_key {
             None
         } else if let Some(id) = self.ensure_parent(path, summary) {
@@ -322,7 +524,7 @@ impl LiveTree {
             0
         };
         self.alive[id] = true;
-        self.index.insert(key, id);
+        self.index.insert(key.into_os_string(), id);
         if kind != EntryKind::Directory {
             self.weights[id] = if self.filter.matches(&self.tree.nodes[id]) {
                 self.tree.nodes[id].size
@@ -341,7 +543,8 @@ impl LiveTree {
     }
 
     fn retire(&mut self, id: NodeId) {
-        self.index.remove(&path_key(&self.tree.nodes[id].path));
+        self.index
+            .remove(path_key(&self.tree.nodes[id].path).as_os_str());
         self.count(self.tree.nodes[id].kind, false);
         if let Some(skipped) = self.skipped.remove(&id) {
             self.tree.stats.skipped = self.tree.stats.skipped.saturating_sub(skipped);
@@ -392,7 +595,7 @@ impl LiveTree {
         } else {
             return;
         };
-        let existing = self.index.get(&key).copied();
+        let existing = self.index.get(key.as_os_str()).copied();
         let old = existing
             .map(|id| (self.tree.nodes[id].size, self.weights[id]))
             .unwrap_or((0, 0));
@@ -403,7 +606,7 @@ impl LiveTree {
         let mut old_index = HashMap::with_capacity(old_ids.len());
         for &id in &old_ids {
             let old_key = path_key(&self.tree.nodes[id].path);
-            self.index.remove(&old_key);
+            self.index.remove(old_key.as_os_str());
             old_index.insert(old_key, id);
             self.count(self.tree.nodes[id].kind, false);
             if let Some(skipped) = self.skipped.remove(&id) {
@@ -471,7 +674,7 @@ impl LiveTree {
                 children,
             };
             self.alive[id] = true;
-            self.index.insert(path_key(&node.path), id);
+            self.index.insert(path_key(&node.path).into_os_string(), id);
             self.count(node.kind, true);
             summary.inspected += 1;
         }
@@ -536,15 +739,50 @@ fn basename(path: &Path) -> String {
         .into_owned()
 }
 
+fn child_key(parent: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(text) = name.to_str() {
+            if text.is_ascii() {
+                // The usual lowercase ASCII scanner name needs no temporary
+                // UTF-16 buffers or leaf allocation at all.
+                if text.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                    return join_key(parent, std::ffi::OsStr::new(&text.to_ascii_lowercase()));
+                }
+                return join_key(parent, name);
+            }
+            return join_key(parent, std::ffi::OsStr::new(&text.to_lowercase()));
+        }
+        join_key(parent, windows_path(Path::new(name)).as_os_str())
+    }
+    #[cfg(not(windows))]
+    join_key(parent, name)
+}
+
+fn join_key(parent: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    let mut joined = std::ffi::OsString::with_capacity(parent.as_os_str().len() + name.len() + 1);
+    joined.push(parent.as_os_str());
+    if !parent
+        .as_os_str()
+        .as_encoded_bytes()
+        .last()
+        .is_some_and(|&last| last == b'/' || (cfg!(windows) && last == b'\\'))
+    {
+        joined.push(std::path::MAIN_SEPARATOR_STR);
+    }
+    // A scanner filename is a normal component. Appending its raw spelling
+    // also preserves a Unicode leaf whose lowercase begins like a drive name.
+    joined.push(name);
+    PathBuf::from(joined)
+}
+
 /// Lexical identity, without canonicalization (which would follow links and
 /// would fail for removed paths). Windows extended prefixes and case variants
 /// normalize to the same key, while unpaired UTF-16 units are preserved.
 pub(crate) fn path_key(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     #[cfg(windows)]
-    let path = windows_path(path);
-    #[cfg(not(windows))]
-    let path = path.to_owned();
-    let absolute = std::path::absolute(&path).unwrap_or(path);
+    let absolute = windows_path(&absolute);
     let mut result = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -826,5 +1064,271 @@ mod tests {
         assert!(summary.inspected <= 2, "{summary:?}");
         assert_eq!(live.tree.total_size(), FILES as u64);
         assert_eq!(live.tree.nodes[0].children[FILES / 2 - 1], FILES / 2);
+    }
+
+    fn preview_seed(kind: EntryKind, size: u64) -> LiveTree {
+        let root = PathBuf::from("preview-fixture");
+        let mut seed = node(&root, "", kind, size, None);
+        seed.path = root;
+        LiveTree::new(ScanTree {
+            nodes: vec![seed],
+            root: 0,
+            stats: ScanStats {
+                files: u64::from(kind == EntryKind::File),
+                directories: u64::from(kind == EntryKind::Directory),
+                symlinks: u64::from(kind == EntryKind::Symlink),
+                ..ScanStats::default()
+            },
+        })
+    }
+
+    #[test]
+    fn preview_chunks_fold_new_and_existing_ancestors_with_active_filters() {
+        let mut live = preview_seed(EntryKind::Directory, 0);
+        let root = live.tree.nodes[0].path.clone();
+        live.set_filter("*.txt;>5B").unwrap();
+        let first = vec![
+            node(&root, "a", EntryKind::Directory, 0, Some(0)),
+            node(&root, "keep.txt", EntryKind::File, 4, Some(0)),
+            node(&root, "a/large.txt", EntryKind::File, 12, Some(1)),
+            node(&root, "a/link", EntryKind::Symlink, 0, Some(1)),
+        ];
+        let summary = live.append_scan(1, first).unwrap();
+        assert_eq!((summary.changed, summary.inspected), (4, 9));
+        assert_eq!(live.tree.total_size(), 16);
+        assert_eq!(live.weights, [12, 12, 0, 12, 0]);
+        assert_eq!(
+            (
+                live.tree.stats.files,
+                live.tree.stats.directories,
+                live.tree.stats.symlinks
+            ),
+            (2, 2, 1)
+        );
+        live.set_filter("*.txt").unwrap();
+        let second = vec![
+            node(&root, "a/deep", EntryKind::Directory, 0, Some(1)),
+            node(&root, "a/deep/other.bin", EntryKind::File, 7, Some(5)),
+            node(&root, "a/deep/new.txt", EntryKind::File, 3, Some(5)),
+            node(&root, "another.bin", EntryKind::File, 10, Some(0)),
+        ];
+        let summary = live.append_scan(5, second).unwrap();
+        assert_eq!((summary.changed, summary.inspected), (4, 10));
+        assert_eq!(live.tree.total_size(), 36);
+        assert_eq!((live.tree.nodes[1].size, live.tree.nodes[5].size), (22, 10));
+        assert_eq!(
+            (live.weights[0], live.weights[1], live.weights[5]),
+            (19, 15, 3)
+        );
+        live.set_filter(">10B").unwrap();
+        let summary = live
+            .append_scan(
+                9,
+                vec![node(
+                    &root,
+                    "a/deep/extra.txt",
+                    EntryKind::File,
+                    20,
+                    Some(5),
+                )],
+            )
+            .unwrap();
+        assert_eq!((summary.changed, summary.inspected), (1, 5));
+        assert_eq!(live.tree.total_size(), 56);
+        assert_eq!((live.tree.nodes[1].size, live.tree.nodes[5].size), (42, 30));
+        assert_eq!(
+            (live.weights[0], live.weights[1], live.weights[5]),
+            (32, 32, 20)
+        );
+        assert_eq!(live.find(&root.join("a/deep/extra.txt")), Some(9));
+        assert_eq!(
+            (
+                live.tree.stats.files,
+                live.tree.stats.directories,
+                live.tree.stats.symlinks
+            ),
+            (6, 3, 1)
+        );
+    }
+
+    #[test]
+    fn invalid_preview_chunk_is_atomic_including_prior_valid_entries() {
+        let mut live = preview_seed(EntryKind::Directory, 0);
+        let root = live.tree.nodes[0].path.clone();
+        let valid = || node(&root, "file.txt", EntryKind::File, 7, Some(0));
+        let mut with_children = valid();
+        with_children.children.push(99);
+        let cases = vec![
+            (2, vec![valid()]),
+            (1, vec![valid(), valid()]),
+            (
+                1,
+                vec![node(&root, "future.txt", EntryKind::File, 1, Some(2))],
+            ),
+            (
+                1,
+                vec![
+                    valid(),
+                    node(&root, "file.txt/child", EntryKind::File, 1, Some(1)),
+                ],
+            ),
+            (
+                1,
+                vec![
+                    node(&root, "link", EntryKind::Symlink, 0, Some(0)),
+                    node(&root, "link/outside", EntryKind::File, 1, Some(1)),
+                ],
+            ),
+            (
+                1,
+                vec![node(&root, "nested/child", EntryKind::File, 1, Some(0))],
+            ),
+            (
+                1,
+                vec![node(&root, "../outside", EntryKind::File, 1, Some(0))],
+            ),
+            (1, vec![with_children]),
+            (
+                1,
+                vec![node(
+                    &root,
+                    "bad-directory",
+                    EntryKind::Directory,
+                    1,
+                    Some(0),
+                )],
+            ),
+            (
+                1,
+                vec![node(&root, "bad-link", EntryKind::Symlink, 1, Some(0))],
+            ),
+            (1, vec![node(&root, "no-parent", EntryKind::File, 1, None)]),
+            (1, vec![node(&root, "", EntryKind::Directory, 0, Some(0))]),
+            (1, vec![valid(); 8193]),
+        ];
+        let original = format!("{live:?}");
+        for (start, nodes) in cases {
+            let error = live.append_scan(start, nodes).unwrap_err();
+            assert!(!error.is_empty());
+            assert_eq!(format!("{live:?}"), original, "{error}");
+        }
+        live.append_scan(1, vec![valid()]).unwrap();
+        let before = format!("{live:?}");
+        assert!(live.append_scan(2, vec![valid()]).is_err());
+        assert!(
+            live.append_scan(
+                2,
+                vec![node(&root, "file.txt/child", EntryKind::File, 1, Some(1))]
+            )
+            .is_err()
+        );
+        assert_eq!(format!("{live:?}"), before);
+        assert_eq!(live.find(&root.join("file.txt")), Some(1));
+    }
+
+    #[test]
+    fn preview_flat_hundred_thousand_files_have_linear_inspection_work() {
+        const FILES: usize = 100_000;
+        let mut live = preview_seed(EntryKind::Directory, 0);
+        live.set_filter("*.bin;>3B").unwrap();
+        let root = live.tree.nodes[0].path.clone();
+        let (mut total, mut visible, mut inspected, mut chunks) = (0_u64, 0_u64, 0, 0);
+        for first in (0..FILES).step_by(8192) {
+            let chunk: Vec<_> = (first..(first + 8192).min(FILES))
+                .map(|index| {
+                    let size = (index % 7 + 1) as u64;
+                    total += size;
+                    if size > 3 {
+                        visible += size;
+                    }
+                    node(
+                        &root,
+                        &format!("f{index:06}.bin"),
+                        EntryKind::File,
+                        size,
+                        Some(0),
+                    )
+                })
+                .collect();
+            inspected += live.append_scan(first + 1, chunk).unwrap().inspected;
+            chunks += 1;
+            assert_eq!(live.tree.total_size(), total);
+            assert_eq!(live.weights[0], visible);
+        }
+        assert_eq!(inspected, FILES * 2 + chunks, "root visited once per chunk");
+        assert_eq!(live.tree.stats.files, FILES as u64);
+        assert_eq!(live.tree.nodes[0].children, (1..=FILES).collect::<Vec<_>>());
+        assert_eq!(live.tree.nodes.len(), FILES + 1);
+    }
+
+    #[test]
+    fn preview_discovery_order_can_transition_to_live_updates_once() {
+        let mut live = preview_seed(EntryKind::Directory, 0);
+        let root = live.tree.nodes[0].path.clone();
+        live.append_scan(
+            1,
+            vec![
+                node(&root, "small", EntryKind::File, 1, Some(0)),
+                node(&root, "large", EntryKind::File, 100, Some(0)),
+                node(&root, "medium", EntryKind::File, 50, Some(0)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(live.tree.nodes[0].children, [1, 2, 3]);
+        live.apply(&[upsert(root.join("small"), 200)]);
+        assert_eq!(live.tree.nodes[0].children, [1, 2, 3]);
+        assert_eq!(live.tree.total_size(), 350);
+        assert!(
+            live.append_scan(4, vec![node(&root, "late", EntryKind::File, 1, Some(0))])
+                .is_err()
+        );
+        assert_eq!(live.append_scan(4, Vec::new()).unwrap().changed, 0);
+    }
+
+    #[test]
+    fn file_root_accepts_empty_preview_but_rejects_children() {
+        let mut live = preview_seed(EntryKind::File, 12);
+        let root = live.tree.nodes[0].path.clone();
+        assert_eq!(live.append_scan(1, Vec::new()).unwrap().inspected, 0);
+        assert!(
+            live.append_scan(1, vec![node(&root, "child", EntryKind::File, 2, Some(0))])
+                .is_err()
+        );
+        assert_eq!(live.tree.total_size(), 12);
+        assert_eq!(live.weights, [12]);
+        assert_eq!((live.tree.stats.files, live.tree.stats.directories), (1, 0));
+    }
+
+    #[test]
+    fn preview_fast_keys_agree_with_full_normalization_and_parent_aliases() {
+        let mut live = preview_seed(EntryKind::Directory, 0);
+        let root = live.tree.nodes[0].path.clone();
+        let names = ["UPPER.TXT", "фОТО🦀.txt", "İstanbul.bin"];
+        live.append_scan(
+            1,
+            names
+                .iter()
+                .map(|name| node(&root, name, EntryKind::File, 1, Some(0)))
+                .collect(),
+        )
+        .unwrap();
+        for (offset, name) in names.iter().enumerate() {
+            let path = std::path::absolute(root.join(name)).unwrap();
+            assert_eq!(live.find(&path), Some(offset + 1));
+        }
+        let absolute_root = std::path::absolute(&root).unwrap();
+        live.append_scan(
+            4,
+            vec![node(
+                &absolute_root,
+                "alias.txt",
+                EntryKind::File,
+                2,
+                Some(0),
+            )],
+        )
+        .unwrap();
+        assert_eq!(live.find(&root.join("alias.txt")), Some(4));
+        assert_eq!(live.tree.total_size(), 5);
     }
 }
