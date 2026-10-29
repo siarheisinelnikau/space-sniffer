@@ -252,6 +252,11 @@ impl App {
     }
 
     fn install_preview(&mut self, start: usize, mut nodes: Vec<Node>) {
+        // Keep a complete existing map visible during an optional rescan.
+        // Selecting a different root already clears loaded in begin_scan.
+        if self.loaded && !self.partial {
+            return;
+        }
         if start == 0 {
             if nodes.len() != 1 || nodes[0].parent.is_some() {
                 return;
@@ -1525,5 +1530,26 @@ mod tests {
         assert!(app.error.is_none());
         assert!(!app.partial);
         assert_eq!(app.model.tree.total_size(), 30);
+    }
+
+    #[test]
+    fn optional_rescan_preserves_the_complete_map_and_navigation_until_ready() {
+        let source = tree(0);
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(0)));
+        app.navigate(1);
+        app.selected = 2;
+        app.loading = true;
+        app.install_preview(0, preview_nodes(&source, 0..1));
+        app.install_preview(1, preview_nodes(&source, 1..source.nodes.len()));
+        assert!(!app.partial);
+        assert_eq!(app.model.tree.total_size(), 30);
+        assert_eq!(app.zoom, 1);
+        assert_eq!(app.selected, 2);
+        app.install_model(LiveTree::new(tree(10)));
+        assert_eq!(app.model.tree.total_size(), 40);
+        assert_eq!(app.zoom, 1);
+        assert_eq!(app.selected, 2);
+        assert!(!app.loading);
     }
 }
