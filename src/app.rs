@@ -962,22 +962,23 @@ impl App {
         for (index, tile) in tiles.iter().enumerate() {
             let node = &self.model.tree.nodes[tile.id];
             let rect = tile.rect.shrink(1.0);
-            let mut color = color(node, self.classic, tile.level);
+            let mut color = tile.colors[usize::from(self.classic)];
             if hovered == Some(index) {
                 color = color.gamma_multiply(1.17);
             }
-            painter.rect_filled(rect, 2.0, color);
-            painter.rect_stroke(
+            // One combined shape avoids tessellating fill and border twice.
+            // Tiny rectangles do not need rounded-corner geometry.
+            painter.rect(
                 rect,
-                2.0,
+                if rect.width().min(rect.height()) < 32.0 {
+                    0.0
+                } else {
+                    2.0
+                },
+                color,
                 Stroke::new(1.0_f32, color.gamma_multiply(1.3)),
                 StrokeKind::Inside,
             );
-            let label = if tile.collapsed > 0 {
-                format!("{} smaller entries", tile.collapsed)
-            } else {
-                node.name.clone()
-            };
             let text_rect = if tile.container {
                 Rect::from_min_size(
                     rect.min + Vec2::new(7.0, 2.0),
@@ -987,6 +988,11 @@ impl App {
                 rect.shrink(7.0)
             };
             if text_rect.width() > 40.0 && text_rect.height() > 12.0 {
+                let label = if tile.collapsed > 0 {
+                    std::borrow::Cow::Owned(format!("{} smaller entries", tile.collapsed))
+                } else {
+                    std::borrow::Cow::Borrowed(node.name.as_str())
+                };
                 let clipped = painter.with_clip_rect(text_rect);
                 if tile.container {
                     clipped.text(
@@ -1174,9 +1180,9 @@ struct DrawTile {
     id: usize,
     rect: Rect,
     container: bool,
-    level: usize,
     bytes: u64,
     collapsed: usize,
+    colors: [Color32; 2],
 }
 
 struct MapCache {
@@ -1211,7 +1217,21 @@ fn collect_tiles(
     level: usize,
     out: &mut Vec<DrawTile>,
 ) {
-    if out.len() >= 8000 || rect.width() < 2.0 || rect.height() < 2.0 {
+    collect_tiles_with_limit(tree, weights, id, rect, remaining, level, out, 8000);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_tiles_with_limit(
+    tree: &ScanTree,
+    weights: &[u64],
+    id: usize,
+    rect: Rect,
+    remaining: usize,
+    level: usize,
+    out: &mut Vec<DrawTile>,
+    ceiling: usize,
+) {
+    if out.len() >= ceiling || rect.width() < 2.0 || rect.height() < 2.0 {
         return;
     }
     let node = &tree.nodes[id];
@@ -1224,9 +1244,9 @@ fn collect_tiles(
         id,
         rect,
         container,
-        level,
         bytes: weights[id],
         collapsed: 0,
+        colors: [color(node, false, level), color(node, true, level)],
     });
     if !container {
         return;
@@ -1236,9 +1256,9 @@ fn collect_tiles(
         &node.children,
         weights,
         inner.area(),
-        1024.min(8000 - out.len()),
+        1024.min(ceiling - out.len()),
     );
-    for tile in treemap::layout(
+    let layout = treemap::layout(
         &items.items,
         treemap::Rect {
             x: inner.min.x,
@@ -1246,10 +1266,9 @@ fn collect_tiles(
             width: inner.width(),
             height: inner.height(),
         },
-    ) {
-        if out.len() >= 8000 {
-            break;
-        }
+    );
+    let siblings = layout.len();
+    for (index, tile) in layout.into_iter().enumerate() {
         let bounds = Rect::from_min_size(
             Pos2::new(tile.rect.x, tile.rect.y),
             Vec2::new(tile.rect.width, tile.rect.height),
@@ -1259,13 +1278,15 @@ fn collect_tiles(
                 id,
                 rect: bounds,
                 container: false,
-                level: level + 1,
                 bytes: items.collapsed_bytes,
                 collapsed: items.collapsed_count,
+                colors: [color(node, false, level + 1), color(node, true, level + 1)],
             });
             continue;
         }
-        collect_tiles(
+        // Reserve one rectangle for each remaining sibling. A deep branch
+        // cannot exhaust the global cap and hide whole later folders.
+        collect_tiles_with_limit(
             tree,
             weights,
             tile.id,
@@ -1273,6 +1294,7 @@ fn collect_tiles(
             remaining - 1,
             level + 1,
             out,
+            ceiling - (siblings - index - 1),
         );
     }
 }
@@ -1389,6 +1411,106 @@ mod tests {
         println!(
             "replace million-node model on UI: {:.3} ms",
             started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    fn tiled_tree() -> ScanTree {
+        let mut source = tree(0);
+        source.nodes.truncate(1);
+        source.nodes[0].children.clear();
+        source.nodes[0].size = 64 * 128 * 1024;
+        for directory in 0..64 {
+            let id = source.nodes.len();
+            let path = source.nodes[0].path.join(format!("folder{directory}"));
+            source.nodes[0].children.push(id);
+            source.nodes.push(Node {
+                name: format!("folder{directory}"),
+                path: path.clone(),
+                kind: EntryKind::Directory,
+                size: 128 * 1024,
+                children: (id + 1..id + 129).collect(),
+                parent: Some(0),
+                modified: None,
+            });
+            for file in 0..128 {
+                source.nodes.push(Node {
+                    name: format!("file{file}.bin"),
+                    path: path.join(format!("file{file}.bin")),
+                    kind: EntryKind::File,
+                    size: 1024,
+                    children: Vec::new(),
+                    parent: Some(id),
+                    modified: None,
+                });
+            }
+        }
+        source.stats.files = 8192;
+        source.stats.directories = 65;
+        source
+    }
+
+    #[test]
+    fn dense_map_keeps_every_top_level_folder_when_the_tile_budget_is_full() {
+        let source = tiled_tree();
+        let weights = source
+            .nodes
+            .iter()
+            .map(|node| node.size)
+            .collect::<Vec<_>>();
+        let mut tiles = Vec::new();
+        collect_tiles(
+            &source,
+            &weights,
+            0,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0)),
+            4,
+            0,
+            &mut tiles,
+        );
+        assert!(tiles.len() <= 8000);
+        for &directory in &source.nodes[0].children {
+            assert!(tiles.iter().any(|tile| tile.id == directory));
+        }
+    }
+
+    /// Exercises the global drawing cap, text, colors, and shape submission.
+    #[test]
+    #[ignore = "manual dense-map UI benchmark"]
+    fn profile_dense_map_frames() {
+        let ctx = egui::Context::default();
+        let mut app = App::empty(ctx.clone());
+        app.install_model(LiveTree::new(tiled_tree()));
+        let mut rebuilt = Vec::new();
+        let mut cached = Vec::new();
+        for pass in 0..42 {
+            if pass % 2 == 0 {
+                app.invalidate();
+            }
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0))),
+                ..Default::default()
+            };
+            let started = Instant::now();
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.canvas(ui));
+            });
+            let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            if pass % 2 == 0 {
+                rebuilt.push(ms);
+            } else {
+                cached.push(ms);
+            }
+        }
+        rebuilt.sort_by(f64::total_cmp);
+        cached.sort_by(f64::total_cmp);
+        println!(
+            "dense map {} tiles, rebuild+tessellate median {:.3}ms p95 {:.3}ms; cached+tessellate median {:.3}ms p95 {:.3}ms",
+            app.map_cache.as_ref().unwrap().tiles.len(),
+            rebuilt[10],
+            rebuilt[19],
+            cached[10],
+            cached[19]
         );
     }
 
