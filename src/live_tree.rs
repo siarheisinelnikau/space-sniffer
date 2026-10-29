@@ -14,6 +14,7 @@ use std::{
     cmp::Ordering,
     collections::{BinaryHeap, HashMap, HashSet},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     time::SystemTime,
 };
 
@@ -39,6 +40,8 @@ pub struct LiveTree {
     root_key: PathBuf,
     scan_append_ordered: bool,
     preview_unsorted: bool,
+    identity: u64,
+    revision: u64,
     // A baseline scan only has a global skipped count. Its unattributed skips
     // remain at the root until root resync; later subtree counts are tracked.
     skipped: HashMap<NodeId, u64>,
@@ -87,6 +90,8 @@ impl LiveTree {
             root_key,
             scan_append_ordered,
             preview_unsorted: false,
+            identity: next_identity(),
+            revision: 0,
             skipped,
         }
     }
@@ -100,21 +105,69 @@ impl LiveTree {
     }
 
     pub fn set_filter(&mut self, input: &str) -> Result<(), String> {
+        let mut job = self.begin_filter(input)?;
+        while !job.step(self, usize::MAX)? {}
+        self.commit_filter(job)
+    }
+
+    /// Start a filter without cloning the model or walking its entries. Active
+    /// weights remain visible until a complete, non-stale job is committed.
+    pub fn begin_filter(&self, input: &str) -> Result<FilterJob, String> {
         let filter = Filter::parse(input)?;
-        let order = self.subtree_ids(self.tree.root);
-        for &id in order.iter().rev() {
-            self.weights[id] = if self.tree.nodes[id].is_dir() {
-                self.tree.nodes[id]
-                    .children
-                    .iter()
-                    .fold(0_u64, |sum, &child| sum.saturating_add(self.weights[child]))
-            } else if filter.matches(&self.tree.nodes[id]) {
-                self.tree.nodes[id].size
-            } else {
-                0
-            };
+        let unchanged = filter == self.filter;
+        let (work, total) = if unchanged {
+            (FilterWork::Complete, self.index.len())
+        } else if filter.is_empty() {
+            (FilterWork::Copy { next: 0 }, self.tree.nodes.len())
+        } else if self.scan_append_ordered {
+            (
+                FilterWork::Ordered {
+                    next: self.tree.nodes.len(),
+                },
+                self.tree.nodes.len(),
+            )
+        } else if self.contains(self.tree.root) {
+            (
+                FilterWork::Traversal {
+                    stack: vec![FilterFrame {
+                        id: self.tree.root,
+                        next_child: 0,
+                        sum: 0,
+                    }],
+                },
+                self.index.len(),
+            )
+        } else {
+            (FilterWork::Complete, 0)
+        };
+        Ok(FilterJob {
+            filter,
+            weights: (!unchanged).then(|| vec![0; self.tree.nodes.len()]),
+            work,
+            identity: self.identity,
+            revision: self.revision,
+            source_len: self.tree.nodes.len(),
+            processed: if unchanged { total } else { 0 },
+            total,
+        })
+    }
+
+    /// Atomically install a finished filter. The job must have read this exact
+    /// model revision; stale or incomplete jobs leave active weights untouched.
+    pub fn commit_filter(&mut self, mut job: FilterJob) -> Result<(), String> {
+        if job.is_stale(self) {
+            return Err("Filter source changed; restart the filter job.".into());
         }
-        self.filter = filter;
+        if !matches!(job.work, FilterWork::Complete) {
+            return Err("The filter job is not complete.".into());
+        }
+        if let Some(weights) = job.weights.take() {
+            self.weights = weights;
+        }
+        self.filter = job.filter;
+        // An already-active/no-allocation job relies on the active filter as
+        // well as source nodes. Committing another job invalidates that basis.
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -283,12 +336,14 @@ impl LiveTree {
             }
         }
         self.preview_unsorted = true;
+        self.revision = self.revision.wrapping_add(1);
         Ok(summary)
     }
 
     pub fn apply(&mut self, changes: &[Change]) -> UpdateSummary {
         let mut summary = UpdateSummary::default();
         if !changes.is_empty() {
+            self.revision = self.revision.wrapping_add(1);
             self.scan_append_ordered = false;
             if self.preview_unsorted {
                 // Native changes normally start after sorted final Ready. A
@@ -718,6 +773,166 @@ impl LiveTree {
             summary,
         );
     }
+}
+
+/// Bounded, read-only work for an interactive filter. Mutations through apply
+/// or append_scan, and replacement with a different LiveTree, invalidate it.
+#[derive(Debug)]
+pub struct FilterJob {
+    filter: Filter,
+    weights: Option<Vec<u64>>,
+    work: FilterWork,
+    identity: u64,
+    revision: u64,
+    source_len: usize,
+    processed: usize,
+    total: usize,
+}
+
+#[derive(Debug)]
+enum FilterWork {
+    Copy { next: usize },
+    Ordered { next: usize },
+    Traversal { stack: Vec<FilterFrame> },
+    Complete,
+}
+
+#[derive(Debug)]
+struct FilterFrame {
+    id: NodeId,
+    next_child: usize,
+    sum: u64,
+}
+
+impl FilterJob {
+    pub fn processed(&self) -> usize {
+        self.processed
+    }
+    pub fn total(&self) -> usize {
+        self.total
+    }
+    pub fn is_stale(&self, model: &LiveTree) -> bool {
+        self.identity != model.identity
+            || self.revision != model.revision
+            || self.source_len != model.tree.nodes.len()
+    }
+
+    /// Inspect at most budget entries/edges. A flat directory never pushes its
+    /// complete child list onto a stack. Returns true once commit can succeed.
+    pub fn step(&mut self, model: &LiveTree, budget: usize) -> Result<bool, String> {
+        if self.is_stale(model) {
+            return Err("Filter source changed; restart the filter job.".into());
+        }
+        if matches!(self.work, FilterWork::Complete) {
+            return Ok(true);
+        }
+        let weights = self.weights.as_mut().expect("unfinished jobs own weights");
+        for _ in 0..budget {
+            match &mut self.work {
+                FilterWork::Copy { next } => {
+                    if *next == model.tree.nodes.len() {
+                        self.work = FilterWork::Complete;
+                        break;
+                    }
+                    weights[*next] = if model.contains(*next) {
+                        model.tree.nodes[*next].size
+                    } else {
+                        0
+                    };
+                    *next += 1;
+                    self.processed += 1;
+                    if *next == model.tree.nodes.len() {
+                        self.work = FilterWork::Complete;
+                        break;
+                    }
+                }
+                FilterWork::Ordered { next } => {
+                    if *next == 0 {
+                        self.work = FilterWork::Complete;
+                        break;
+                    }
+                    *next -= 1;
+                    let id = *next;
+                    let node = &model.tree.nodes[id];
+                    if !node.is_dir() {
+                        weights[id] = if self.filter.matches(node) {
+                            node.size
+                        } else {
+                            0
+                        };
+                    }
+                    if let Some(parent) = node.parent {
+                        weights[parent] = weights[parent].saturating_add(weights[id]);
+                    }
+                    self.processed += 1;
+                    if *next == 0 {
+                        self.work = FilterWork::Complete;
+                        break;
+                    }
+                }
+                FilterWork::Traversal { stack } => {
+                    let Some(frame) = stack.last_mut() else {
+                        self.work = FilterWork::Complete;
+                        break;
+                    };
+                    let node = &model.tree.nodes[frame.id];
+                    if !node.is_dir() {
+                        let value = if self.filter.matches(node) {
+                            node.size
+                        } else {
+                            0
+                        };
+                        weights[frame.id] = value;
+                        stack.pop();
+                        if let Some(parent) = stack.last_mut() {
+                            parent.sum = parent.sum.saturating_add(value);
+                        }
+                        self.processed += 1;
+                    } else if let Some(&child) = node.children.get(frame.next_child) {
+                        frame.next_child += 1;
+                        if model.contains(child) {
+                            let child_node = &model.tree.nodes[child];
+                            if child_node.is_dir() {
+                                stack.push(FilterFrame {
+                                    id: child,
+                                    next_child: 0,
+                                    sum: 0,
+                                });
+                            } else {
+                                let value = if self.filter.matches(child_node) {
+                                    child_node.size
+                                } else {
+                                    0
+                                };
+                                weights[child] = value;
+                                frame.sum = frame.sum.saturating_add(value);
+                                self.processed += 1;
+                            }
+                        }
+                    } else {
+                        weights[frame.id] = frame.sum;
+                        let value = frame.sum;
+                        stack.pop();
+                        if let Some(parent) = stack.last_mut() {
+                            parent.sum = parent.sum.saturating_add(value);
+                        }
+                        self.processed += 1;
+                    }
+                    if stack.is_empty() {
+                        self.work = FilterWork::Complete;
+                        break;
+                    }
+                }
+                FilterWork::Complete => break,
+            }
+        }
+        Ok(matches!(self.work, FilterWork::Complete))
+    }
+}
+
+fn next_identity() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, AtomicOrdering::Relaxed)
 }
 
 fn node_kind_changed(node: &Node, kind: EntryKind) -> bool {
@@ -1330,5 +1545,110 @@ mod tests {
         .unwrap();
         assert_eq!(live.find(&root.join("alias.txt")), Some(4));
         assert_eq!(live.tree.total_size(), 5);
+    }
+
+    #[test]
+    fn filter_jobs_are_bounded_and_atomically_install_complete_weights() {
+        let mut live = LiveTree::new(tree());
+        let original = live.weights.clone();
+        let mut job = live.begin_filter("*.txt").unwrap();
+        assert_eq!(job.total(), 5);
+        assert!(!job.step(&live, 0).unwrap());
+        for step in 1..=5 {
+            let before = job.processed();
+            let done = job.step(&live, 1).unwrap();
+            assert!(job.processed() - before <= 1);
+            assert_eq!(live.weights, original);
+            assert_eq!(done, step == 5);
+        }
+        live.commit_filter(job).unwrap();
+        assert_eq!(live.weights, [30, 30, 0, 30, 0]);
+        let repeat = live.begin_filter("*.TXT").unwrap();
+        assert!(matches!(repeat.work, FilterWork::Complete));
+        assert!(repeat.weights.is_none());
+        let mut clear = live.begin_filter("").unwrap();
+        assert!(!clear.step(&live, 1).unwrap());
+        assert_eq!(clear.processed(), 1);
+        assert!(clear.step(&live, 10).unwrap());
+        live.commit_filter(clear).unwrap();
+        assert_eq!(live.weights, original);
+    }
+
+    #[test]
+    fn incomplete_and_stale_filter_jobs_never_change_active_weights() {
+        let mut live = LiveTree::new(tree());
+        let original = live.weights.clone();
+        let incomplete = live.begin_filter("*.txt").unwrap();
+        assert!(live.commit_filter(incomplete).is_err());
+        assert_eq!(live.weights, original);
+        let mut stale = live.begin_filter("*.txt").unwrap();
+        stale.step(&live, 1).unwrap();
+        let path = live.tree.nodes[3].path.clone();
+        live.apply(&[upsert(path, 11)]);
+        let current = live.weights.clone();
+        assert!(stale.is_stale(&live));
+        assert!(stale.step(&live, 100).is_err());
+        assert!(live.commit_filter(stale).is_err());
+        assert_eq!(live.weights, current);
+        let replacement = LiveTree::new(tree());
+        assert!(live.begin_filter("*.txt").unwrap().is_stale(&replacement));
+    }
+
+    #[test]
+    fn filter_job_traverses_recycled_ids_without_a_whole_child_stack() {
+        let mut live = LiveTree::new(tree());
+        let old = live.tree.nodes[1].path.clone();
+        live.apply(&[Change::Remove(old)]);
+        let path = live.tree.nodes[2].path.join("new.txt");
+        live.apply(&[upsert(path, 11)]);
+        let original = live.weights.clone();
+        let mut job = live.begin_filter("*.txt").unwrap();
+        let mut iterations = 0;
+        loop {
+            let before = job.processed();
+            let done = job.step(&live, 1).unwrap();
+            assert!(job.processed() - before <= 1);
+            if let FilterWork::Traversal { stack } = &job.work {
+                assert!(stack.len() <= 2);
+            }
+            assert_eq!(live.weights, original);
+            iterations += 1;
+            if done {
+                break;
+            }
+            assert!(iterations < 20);
+        }
+        live.commit_filter(job).unwrap();
+        assert_eq!(live.weights[0], 11);
+        assert_eq!(live.weights[2], 11);
+    }
+
+    #[test]
+    fn successful_preview_append_invalidates_a_running_filter_job() {
+        let mut live = preview_seed(EntryKind::Directory, 0);
+        let mut job = live.begin_filter("*.txt").unwrap();
+        let root = live.tree.nodes[0].path.clone();
+        live.append_scan(
+            1,
+            vec![node(&root, "file.txt", EntryKind::File, 3, Some(0))],
+        )
+        .unwrap();
+        assert!(job.is_stale(&live));
+        assert!(job.step(&live, 1).is_err());
+    }
+
+    #[test]
+    fn committing_a_filter_invalidates_competing_unchanged_jobs() {
+        let mut live = LiveTree::new(tree());
+        let unchanged = live.begin_filter("").unwrap();
+        assert!(unchanged.weights.is_none());
+        let mut different = live.begin_filter("*.txt").unwrap();
+        assert!(different.step(&live, 100).unwrap());
+        live.commit_filter(different).unwrap();
+        let weights = live.weights.clone();
+        assert!(unchanged.is_stale(&live));
+        assert!(live.commit_filter(unchanged).is_err());
+        assert_eq!(live.weights, weights);
+        assert_eq!(live.weights[0], 30);
     }
 }
