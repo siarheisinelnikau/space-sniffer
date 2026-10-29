@@ -8,7 +8,7 @@ Space Sniffer 0.4 is a native Rust disk explorer with a progressively populated 
 | --- | --- |
 | `src/main.rs` | GUI/CLI arguments and native window startup |
 | `src/app.rs` | Sidebar, live events, navigation, cached geometry, filtering, drawing, and reveal commands |
-| `src/drives.rs` | Suggested drive/root shortcuts; typed paths are unrestricted |
+| `src/platform/` | Isolated Windows/macOS/Unix adapters for root shortcuts, file-manager reveal, and console attachment |
 | `src/lib.rs` | Core library exports and binary-unit byte formatting |
 | `src/model.rs` | Node arena, entry kinds, parent/child IDs, and scan statistics |
 | `src/scanner.rs` | Parallel metadata traversal, bounded progress, cancellation, sorting, and initial totals |
@@ -90,6 +90,8 @@ Filters combine semicolon-separated clauses with AND. Names use case-insensitive
 `export::write_csv` validates the root, weight count, child bounds, and duplicate/cyclic subtree links before writing. Iterative traversal exports connected subtree entries, including filtered and zero-byte entries, with `path`, `kind`, `bytes`, and `visible_bytes`. Directory rows are aggregates and must not be summed with descendants.
 
 CSV uses UTF-8, CRLF records, quote escaping, and a leading apostrophe for potential spreadsheet formulas in paths. Non-UTF-8 paths are represented lossily. Reveal uses `explorer.exe`, `open -R`, or `xdg-open`. Export writes the chosen report; scanning/watching do not modify scanned files. No deletion action or telemetry is implemented.
+
+Desktop integrations live behind `src/platform/mod.rs`, with separate Windows, macOS, and Unix implementations. Platform commands receive literal arguments without a shell. The GUI uses egui's platform-aware command modifier (`Ctrl+O` on Windows/Linux, `Cmd+O` on macOS). The scanning/model/filter/geometry modules remain shared. Experimental app-bundle work and macOS-specific contributions belong in the [`macos` branch](https://github.com/siarheisinelnikau/space-sniffer/tree/macos); CI builds do not replace manual macOS GUI testing.
 
 ## Verification and packaging
 
