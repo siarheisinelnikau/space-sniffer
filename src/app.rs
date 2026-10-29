@@ -26,6 +26,7 @@ pub struct App {
     live: Option<LiveHandle>,
     loaded: bool,
     loading: bool,
+    partial: bool,
     watching: bool,
     watch_status: String,
     progress: Option<ScanProgress>,
@@ -111,6 +112,7 @@ impl App {
             live: None,
             loaded: false,
             loading: false,
+            partial: false,
             watching: false,
             watch_status: String::new(),
             progress: None,
@@ -198,6 +200,7 @@ impl App {
             };
             match event {
                 LiveEvent::Progress(progress) => self.progress = Some(progress),
+                LiveEvent::Preview { start, nodes } => self.install_preview(start, nodes),
                 LiveEvent::Ready(model) => self.install_model(*model),
                 LiveEvent::Changes(changes) => self.apply_changes(&changes),
                 LiveEvent::Status { watching, message } => {
@@ -236,6 +239,7 @@ impl App {
         }
         self.loaded = true;
         self.loading = false;
+        self.partial = false;
         self.error = None;
         self.restore_paths(&selected, &zoom);
         if self.query != self.applied {
@@ -245,6 +249,51 @@ impl App {
             self.filter_error = None;
         }
         self.invalidate();
+    }
+
+    fn install_preview(&mut self, start: usize, mut nodes: Vec<Node>) {
+        if start == 0 {
+            if nodes.len() != 1 || nodes[0].parent.is_some() {
+                return;
+            }
+            let root = nodes.remove(0);
+            let selected = self
+                .loaded
+                .then(|| self.model.tree.nodes[self.selected].path.clone());
+            let zoom = self
+                .loaded
+                .then(|| self.model.tree.nodes[self.zoom].path.clone());
+            let stats = ScanStats {
+                files: u64::from(root.kind == EntryKind::File),
+                directories: u64::from(root.is_dir()),
+                symlinks: u64::from(root.kind == EntryKind::Symlink),
+                ..Default::default()
+            };
+            self.model = LiveTree::new(ScanTree {
+                nodes: vec![root],
+                root: 0,
+                stats,
+            });
+            if !self.applied.is_empty() {
+                let _ = self.model.set_filter(&self.applied);
+            }
+            self.loaded = true;
+            self.loading = true;
+            self.partial = true;
+            if let (Some(selected), Some(zoom)) = (selected, zoom) {
+                self.restore_paths(&selected, &zoom);
+            } else {
+                self.selected = 0;
+                self.zoom = 0;
+            }
+            self.invalidate();
+        } else if self.partial {
+            match self.model.append_scan(start, nodes) {
+                Ok(summary) if summary.changed > 0 => self.invalidate(),
+                Ok(_) => {}
+                Err(error) => self.error = Some(format!("Incomplete scan preview: {error}")),
+            }
+        }
     }
 
     fn apply_changes(&mut self, changes: &[Change]) {
@@ -492,7 +541,7 @@ impl App {
                         if self.loading {
                             if let Some(progress) = &self.progress {
                                 ui.label(format!(
-                                    "{} files · {}",
+                                    "Found {} files · {}",
                                     progress.files,
                                     format_bytes(progress.bytes)
                                 ));
@@ -506,6 +555,9 @@ impl App {
                                 );
                             }
                         } else if self.loaded {
+                            if self.partial {
+                                ui.label(RichText::new("Discovered so far").small().color(MUTED));
+                            }
                             ui.label(
                                 RichText::new(format_bytes(self.model.tree.total_size()))
                                     .size(25.0)
@@ -548,13 +600,22 @@ impl App {
                             ui.separator();
                             self.selection(ui);
                             ui.add_space(5.0);
-                            egui::CollapsingHeader::new("Largest entries")
-                                .show(ui, |ui| self.largest(ui));
+                            egui::CollapsingHeader::new(if self.partial {
+                                "Discovered entries"
+                            } else {
+                                "Largest entries"
+                            })
+                            .id_salt("entries_section")
+                            .show(ui, |ui| self.largest(ui));
                         }
                         ui.separator();
                         ui.horizontal(|ui| {
                             if ui
-                                .add_enabled(self.loaded, egui::Button::new("Export CSV"))
+                                .add_enabled(
+                                    self.loaded && !self.partial,
+                                    egui::Button::new("Export CSV"),
+                                )
+                                .on_disabled_hover_text("Available after the scan completes")
                                 .clicked()
                             {
                                 self.export();
@@ -659,7 +720,11 @@ impl App {
                 if count == 0 {
                     ui.small("No entries");
                 } else if count > 100 {
-                    ui.small("Showing 100 largest entries");
+                    ui.small(if self.partial {
+                        "Showing the first 100 discovered entries"
+                    } else {
+                        "Showing 100 largest entries"
+                    });
                 }
             });
     }
@@ -677,8 +742,18 @@ impl App {
                     if self.loading {
                         ui.label(
                             RichText::new(format!(
-                                "Scanning · {:.1}s",
-                                self.started.elapsed().as_secs_f32()
+                                "Scanning · {:.1}s · {} files on map",
+                                self.started.elapsed().as_secs_f32(),
+                                self.model.tree.stats.files
+                            ))
+                            .small()
+                            .color(MUTED),
+                        );
+                    } else if self.loaded && self.partial {
+                        ui.label(
+                            RichText::new(format!(
+                                "Partial map · {} discovered files",
+                                self.model.tree.stats.files
                             ))
                             .small()
                             .color(MUTED),
@@ -917,7 +992,9 @@ impl App {
             painter.text(
                 area.center(),
                 Align2::CENTER_CENTER,
-                if self.applied.is_empty() {
+                if self.loading {
+                    "Scanning…\nThe map fills as file sizes are discovered."
+                } else if self.applied.is_empty() {
                     "No file bytes here yet.\nNew files will appear automatically."
                 } else {
                     "No files match this filter."
@@ -1029,6 +1106,7 @@ impl eframe::App for App {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label("Choose any drive or folder. Changes update the map automatically.");
+                ui.label("The first scan fills the map progressively; sizes show discovered data.");
                 ui.label("Click: inspect. Double-click: zoom. Backspace: parent.");
                 ui.label("Ctrl+O: choose root. F5: optional full rescan.");
                 ui.separator();
@@ -1373,5 +1451,79 @@ mod tests {
         assert_eq!(app.map_revision, geometry);
         assert_eq!(app.model.tree.nodes[app.zoom].size, 30);
         assert_eq!(app.model.tree.total_size(), 50);
+    }
+
+    fn preview_nodes(tree: &ScanTree, range: std::ops::Range<usize>) -> Vec<Node> {
+        tree.nodes[range]
+            .iter()
+            .map(|node| {
+                let mut node = node.clone();
+                node.children.clear();
+                if node.is_dir() {
+                    node.size = 0;
+                }
+                node
+            })
+            .collect()
+    }
+
+    #[test]
+    fn map_is_drawable_and_navigable_before_ready_then_preserves_the_view() {
+        let source = tree(100);
+        let mut app = App::empty(egui::Context::default());
+        app.install_preview(0, preview_nodes(&source, 0..1));
+        app.install_preview(1, preview_nodes(&source, 1..3));
+        assert!(app.loaded && app.loading && app.partial);
+        assert_eq!(app.model.tree.total_size(), 10);
+        let mut tiles = Vec::new();
+        collect_tiles(
+            &app.model.tree,
+            &app.model.weights,
+            0,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0)),
+            4,
+            0,
+            &mut tiles,
+        );
+        assert!(tiles.iter().any(|tile| tile.bytes > 0 && !tile.container));
+        app.navigate(1);
+        app.selected = 2;
+        app.query = "*.zip".into();
+        app.apply_filter();
+        app.install_preview(3, preview_nodes(&source, 3..source.nodes.len()));
+        assert_eq!(app.model.weights[0], 110);
+        assert_eq!(app.zoom, 1);
+        assert_eq!(app.selected, 2);
+        app.install_model(LiveTree::new(source));
+        assert!(!app.loading && !app.partial);
+        assert_eq!(app.model.weights[0], 110);
+        assert_eq!(app.zoom, 1);
+        assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn stopping_the_initial_scan_keeps_a_marked_partial_map() {
+        let source = tree(0);
+        let mut app = App::empty(egui::Context::default());
+        app.install_preview(0, preview_nodes(&source, 0..1));
+        app.install_preview(1, preview_nodes(&source, 1..source.nodes.len()));
+        app.stop();
+        assert!(app.loaded && app.partial);
+        assert!(!app.loading);
+        assert_eq!(app.model.tree.total_size(), 30);
+    }
+
+    #[test]
+    fn invalid_preview_chunk_keeps_the_map_until_authoritative_ready() {
+        let source = tree(0);
+        let mut app = App::empty(egui::Context::default());
+        app.install_preview(0, preview_nodes(&source, 0..1));
+        app.install_preview(99, preview_nodes(&source, 1..3));
+        assert!(app.error.is_some());
+        assert_eq!(app.model.tree.nodes.len(), 1);
+        app.install_model(LiveTree::new(source));
+        assert!(app.error.is_none());
+        assert!(!app.partial);
+        assert_eq!(app.model.tree.total_size(), 30);
     }
 }
