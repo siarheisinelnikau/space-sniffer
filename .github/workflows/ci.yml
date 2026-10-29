@@ -22,7 +22,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04, macos-15]
+        os: [windows-latest, ubuntu-22.04, macos-15, macos-15-intel]
+        include:
+          - os: macos-15
+            macos_target: aarch64-apple-darwin
+          - os: macos-15-intel
+            macos_target: x86_64-apple-darwin
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -44,3 +51,22 @@ jobs:
         run: cargo test --locked --all-targets
       - name: Build release
         run: cargo build --locked --release
+      - uses: actions/setup-python@v5
+        if: runner.os == 'macOS'
+        with:
+          python-version: '3.13'
+      - name: Test macOS bundle tooling
+        if: runner.os == 'macOS'
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Prepare experimental macOS app
+        if: runner.os == 'macOS'
+        run: python3 scripts/package_macos.py --target ${{ matrix.macos_target }} --binary target/release/space-sniffer
+      - name: Validate macOS bundle structure and linked libraries
+        if: runner.os == 'macOS'
+        env:
+          BUILD_TARGET: ${{ matrix.macos_target }}
+        run: |
+          app="target/macos-bundle/$BUILD_TARGET/Space Sniffer.app"
+          plutil -lint "$app/Contents/Info.plist"
+          test -x "$app/Contents/MacOS/space-sniffer"
+          otool -L "$app/Contents/MacOS/space-sniffer"

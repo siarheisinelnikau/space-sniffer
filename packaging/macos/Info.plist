@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleDisplayName</key><string>Space Sniffer</string>
+    <key>CFBundleName</key><string>Space Sniffer</string>
+    <key>CFBundleExecutable</key><string>space-sniffer</string>
+    <key>CFBundleIdentifier</key><string>io.github.siarheisinelnikau.space-sniffer</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.0.0</string>
+    <key>CFBundleVersion</key><string>0.0.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Space Sniffer reads file names, sizes, and modification times on your Desktop to display disk usage.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Space Sniffer reads file names, sizes, and modification times in Documents to display disk usage.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Space Sniffer reads file names, sizes, and modification times in Downloads to display disk usage.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>Space Sniffer reads file metadata on a network volume when you choose it for a disk usage scan.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Space Sniffer reads file metadata on a removable volume when you choose it for a disk usage scan.</string>
+</dict>
+</plist>
