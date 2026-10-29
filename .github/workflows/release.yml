@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-publish
   cancel-in-progress: false
 
 env:
@@ -66,6 +66,11 @@ jobs:
           set -euo pipefail
           asset=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
           test "$asset" = "space-sniffer.exe"
+          latest=$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name')
+          if [ "$latest" != "$RELEASE_TAG" ]; then
+            echo "Keeping newer release $latest; skipping cleanup for $RELEASE_TAG."
+            exit 0
+          fi
           gh release list --limit 1000 --json tagName --jq '.[].tagName' > previous-releases.txt
           while IFS= read -r previous_tag; do
             if [ "$previous_tag" != "$RELEASE_TAG" ]; then
