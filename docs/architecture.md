@@ -89,6 +89,6 @@ CSV uses UTF-8, CRLF records, quote escaping, and a leading apostrophe for poten
 
 Tests cover scan totals, serial/parallel equivalence, callback affinity, cancellation/backpressure, deep trees, hard links, junctions, incremental updates, watcher behavior, filters, CSV safety, navigation, and geometry. See [performance notes](performance.md) for reproducible timings and cache limits.
 
-CI checks formatting, Clippy, tests, and release builds on Windows, Linux, and macOS. Local desktop verification is on Windows; configured CI jobs do not establish desktop behavior elsewhere. Tags produce Windows x86-64 MSVC, Linux x86-64 GNU, and macOS Apple Silicon executable archives with documentation and checksums. Packages are not signed installers or macOS app bundles.
+CI checks formatting, Clippy, tests, and release builds on Windows, Linux, and macOS. Local desktop verification is on Windows; configured CI jobs do not establish desktop behavior elsewhere. Tags publish only the standalone Windows x86-64 MSVC `space-sniffer.exe`. The workflow verifies its upload before deleting older GitHub release entries and their assets, retaining Git tags and commit history. The executable is unsigned; Linux and macOS remain buildable from source.
 
 This independent implementation is inspired by [Uderzo Software's SpaceSniffer](https://www.uderzo.it/main_products/space_sniffer/) without affiliation or reuse of its code/assets. The project is [MIT licensed](../LICENSE).

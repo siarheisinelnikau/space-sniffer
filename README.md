@@ -2,7 +2,7 @@
 
 A native, live disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
 
-[Download the latest release](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
+[Download Windows .exe](https://github.com/siarheisinelnikau/space-sniffer/releases/latest/download/space-sniffer.exe) · [Latest release](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
 
 ![Space Sniffer on Windows: compact sidebar and live nested disk usage map](docs/screenshot.png)
 
@@ -76,7 +76,7 @@ Install Rust and Xcode Command Line Tools (`xcode-select --install`), then run:
 cargo run --locked --release -- "$HOME"
 ```
 
-The release workflow packages a Windows x86-64 ZIP, a Linux x86-64 GNU tarball, and a macOS Apple Silicon tarball when a `v*` tag is pushed, and publishes them to [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases). These are executable archives, not installers or macOS app bundles.
+Download and run the standalone **space-sniffer.exe** from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). It needs no installation or extraction. Releases contain only the Windows x86-64 executable; Linux and macOS can be built from source. The latest release is kept; older release entries and their assets are removed after a successful upload, while Git tags and commit history remain available.
 
 ## Explore a scan
 
