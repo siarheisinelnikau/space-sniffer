@@ -173,7 +173,11 @@ impl App {
     }
 
     fn stop(&mut self) {
-        self.filter_job = None;
+        if self.filter_job.take().is_some() {
+            // Stopping/restarting a scan must not lose a requested filter
+            // whose sliced computation has not committed yet.
+            self.query_changed = Some(Instant::now() - Duration::from_millis(150));
+        }
         if let Some(prepared) = self.prepared_model.take() {
             drop_in_background(prepared);
         }
@@ -243,6 +247,10 @@ impl App {
                     break;
                 }
             };
+            let changes_model = matches!(
+                event,
+                LiveEvent::Preview { .. } | LiveEvent::Ready(_) | LiveEvent::Changes(_)
+            );
             match event {
                 LiveEvent::Progress(progress) => self.progress = Some(progress),
                 LiveEvent::Preview { start, nodes } => self.install_preview(start, nodes),
@@ -257,10 +265,13 @@ impl App {
                     self.error = Some(error);
                 }
             }
-            if self.prepared_model.is_some() || self.filter_job.is_some() {
+            if changes_model {
+                // Merge at most one tree-bearing event per frame, leaving
+                // time for input and painting during a scan/event burst.
+                self.ctx.request_repaint();
                 break;
             }
-            if budget.elapsed() > Duration::from_millis(8) {
+            if budget.elapsed() > Duration::from_millis(4) {
                 self.ctx.request_repaint();
                 break;
             }
@@ -350,7 +361,12 @@ impl App {
                 root: 0,
                 stats,
             }));
-            if !self.applied.is_empty() {
+            if space_sniffer::filter::Filter::parse(&self.query).is_ok() {
+                let _ = self.model.set_filter(&self.query);
+                self.applied = self.query.clone();
+                self.query_changed = None;
+                self.filter_error = None;
+            } else if !self.applied.is_empty() {
                 let _ = self.model.set_filter(&self.applied);
             }
             self.loaded = true;
@@ -509,6 +525,10 @@ impl App {
                             self.applied = pending.query;
                             self.filter_error = None;
                             self.invalidate();
+                            // An event's original wake may have been consumed
+                            // during filtering. Resume its queued delivery even
+                            // when no further filesystem notification arrives.
+                            self.ctx.request_repaint();
                         }
                         Err(error) => self.filter_error = Some(error),
                     }
@@ -1392,7 +1412,7 @@ fn collect_tiles_with_limit(
         collapsed: 0,
         colors: [color(node, false, level), color(node, true, level)],
     });
-    if !container {
+    if !container || out.len() >= ceiling {
         return;
     }
     let inner = Rect::from_min_max(rect.min + Vec2::new(3.0, 20.0), rect.max - Vec2::splat(4.0));
@@ -1835,6 +1855,28 @@ mod tests {
         assert_eq!(app.applied, "*.zip");
         assert_eq!((app.zoom, app.selected), (1, 2));
         assert!(app.filter_error.is_some());
+    }
+
+    #[test]
+    fn restarting_a_scan_keeps_a_filter_requested_before_its_job_finished() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(40_000)));
+        app.query = "*.bin".into();
+        app.filter_job = Some(PendingFilter {
+            query: app.query.clone(),
+            job: app.model.begin_filter(&app.query).unwrap(),
+        });
+        app.stop();
+        assert!(app.query_changed.is_some());
+        // A new-root seed is cheap enough to establish the requested filter
+        // immediately, before its first files arrive.
+        app.loaded = false;
+        let source = tree(0);
+        app.install_preview(0, preview_nodes(&source, 0..1));
+        app.install_preview(1, preview_nodes(&source, 1..source.nodes.len()));
+        assert_eq!(app.applied, "*.bin");
+        assert_eq!(app.model.weights[0], 20);
+        assert!(app.filter_job.is_none());
     }
 
     #[test]
