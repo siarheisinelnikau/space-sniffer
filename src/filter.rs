@@ -8,12 +8,12 @@
 
 use crate::model::{Node, ScanTree};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Filter {
     clauses: Vec<Clause>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Clause {
     Name {
         pattern: String,
@@ -80,16 +80,38 @@ impl Filter {
         if node.is_dir() {
             return false;
         }
+        // Size clauses are cheap and commute with all name clauses. Reject
+        // them before any Unicode lowering or wildcard work, regardless of
+        // the order in which the user wrote the AND-connected query.
+        if self.clauses.iter().any(|clause| match clause {
+            Clause::LargerThan(bytes) => node.size <= *bytes,
+            Clause::SmallerThan(bytes) => node.size >= *bytes,
+            Clause::Name { .. } => false,
+        }) {
+            return false;
+        }
         let mut lowercase_name = None;
         let mut name_characters = None;
+        let mut ascii_name = None;
         self.clauses.iter().all(|clause| match clause {
-            Clause::LargerThan(bytes) => node.size > *bytes,
-            Clause::SmallerThan(bytes) => node.size < *bytes,
+            Clause::LargerThan(_) | Clause::SmallerThan(_) => true,
             Clause::Name {
                 pattern,
                 glob,
                 exclude,
             } => {
+                if *ascii_name.get_or_insert_with(|| node.name.is_ascii()) {
+                    let matched = pattern.is_ascii()
+                        && if glob.is_some() {
+                            ascii_glob_matches(pattern.as_bytes(), node.name.as_bytes())
+                        } else {
+                            node.name
+                                .as_bytes()
+                                .windows(pattern.len())
+                                .any(|part| part.eq_ignore_ascii_case(pattern.as_bytes()))
+                        };
+                    return matched != *exclude;
+                }
                 let name = lowercase_name.get_or_insert_with(|| node.name.to_lowercase());
                 let matched = match glob {
                     Some(pattern) => {
@@ -123,6 +145,41 @@ impl Filter {
         }
         weights
     }
+}
+
+fn ascii_glob_matches(pattern: &[u8], name: &[u8]) -> bool {
+    if let Some(suffix) = pattern.strip_prefix(b"*")
+        && !suffix.iter().any(|byte| matches!(byte, b'*' | b'?'))
+    {
+        return name.len() >= suffix.len()
+            && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix);
+    }
+    let (mut pattern_index, mut name_index) = (0, 0);
+    let (mut star, mut retry_name) = (None, 0);
+    while name_index < name.len() {
+        if pattern_index < pattern.len()
+            && pattern[pattern_index] != b'*'
+            && (pattern[pattern_index] == b'?'
+                || pattern[pattern_index].eq_ignore_ascii_case(&name[name_index]))
+        {
+            pattern_index += 1;
+            name_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star = Some(pattern_index);
+            pattern_index += 1;
+            retry_name = name_index;
+        } else if let Some(star_index) = star {
+            retry_name += 1;
+            name_index = retry_name;
+            pattern_index = star_index + 1;
+        } else {
+            return false;
+        }
+    }
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }
 
 /// Match Unicode scalar values, so `?` consumes one character rather than one
