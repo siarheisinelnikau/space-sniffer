@@ -1,5 +1,7 @@
 # Space Sniffer
 
+> Experimental macOS development branch. See the [porting guide](docs/macos.md) for Apple Silicon/Intel build instructions and the manual testing still needed. macOS-specific PRs should target `macos`.
+
 **FREE and open source for Windows.** No license fee. Released under the [MIT license](LICENSE).
 
 A native, live disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.

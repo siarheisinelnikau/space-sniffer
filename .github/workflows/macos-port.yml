@@ -1,0 +1,50 @@
+name: macOS port
+
+on:
+  push:
+    branches: [macos]
+  pull_request:
+    branches: [macos]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-port-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+
+jobs:
+  bundle:
+    name: Build and validate (${{ matrix.target }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Test bundle tooling without launching the GUI
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Build native executable
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Prepare experimental app
+        run: python3 scripts/package_macos.py --target ${{ matrix.target }}
+      - name: Validate bundle structure and linked libraries
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          app="target/macos-bundle/$BUILD_TARGET/Space Sniffer.app"
+          plutil -lint "$app/Contents/Info.plist"
+          test -x "$app/Contents/MacOS/space-sniffer"
+          otool -L "$app/Contents/MacOS/space-sniffer"
