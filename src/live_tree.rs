@@ -12,7 +12,8 @@ use crate::{
 };
 use std::{
     cmp::Ordering,
-    collections::{BinaryHeap, HashMap, HashSet},
+    collections::{BinaryHeap, HashMap, HashSet, hash_map::RandomState},
+    hash::{BuildHasher, BuildHasherDefault, Hasher},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     time::SystemTime,
@@ -30,9 +31,7 @@ pub struct UpdateSummary {
 pub struct LiveTree {
     pub tree: ScanTree,
     pub weights: Vec<u64>,
-    // Keys have already been normalized; hashing their raw platform strings
-    // avoids reparsing every Path component on each index operation.
-    index: HashMap<std::ffi::OsString, NodeId>,
+    index: PathIndex,
     alive: Vec<bool>,
     free: Vec<NodeId>,
     retired: Vec<NodeId>,
@@ -53,24 +52,11 @@ impl LiveTree {
             tree.root < tree.nodes.len(),
             "a live tree needs a valid root"
         );
-        let root_path = tree.nodes[tree.root].path.clone();
-        let root_key = path_key(&root_path);
-        let mut index = HashMap::with_capacity(tree.nodes.len());
+        let root_key = path_key(&tree.nodes[tree.root].path);
+        let mut index = PathIndex::with_capacity(tree.nodes.len());
         let mut alive = vec![false; tree.nodes.len()];
         let mut weights = vec![0; tree.nodes.len()];
-        let mut stack = vec![tree.root];
-        while let Some(id) = stack.pop() {
-            if id >= alive.len() || alive[id] {
-                continue;
-            }
-            alive[id] = true;
-            index.insert(path_key(&tree.nodes[id].path).into_os_string(), id);
-            weights[id] = tree.nodes[id].size;
-            stack.extend(tree.nodes[id].children.iter().copied());
-        }
-        let skipped = HashMap::from([(tree.root, tree.stats.skipped)]);
-        let scan_append_ordered = tree.root == 0
-            && index.len() == tree.nodes.len()
+        let ordered = tree.root == 0
             && tree.nodes.iter().enumerate().all(|(id, node)| {
                 if id == tree.root {
                     node.parent.is_none()
@@ -78,7 +64,48 @@ impl LiveTree {
                     node.parent
                         .is_some_and(|parent| parent < id && tree.nodes[parent].is_dir())
                 }
+            })
+            && tree.nodes.iter().enumerate().all(|(id, node)| {
+                node.children.iter().all(|&child| {
+                    child > id && child < tree.nodes.len() && tree.nodes[child].parent == Some(id)
+                })
             });
+        let mut directory_keys = HashMap::new();
+        if ordered {
+            alive[tree.root] = true;
+            for id in 0..tree.nodes.len() {
+                if !alive[id] {
+                    continue;
+                }
+                let node = &tree.nodes[id];
+                let key = construction_key(&tree, id, &root_key, &directory_keys);
+                index.insert(key.as_os_str(), id, &tree.nodes);
+                weights[id] = node.size;
+                if node.is_dir() {
+                    directory_keys.insert(id, key);
+                }
+                for &child in &node.children {
+                    alive[child] = true;
+                }
+            }
+        } else {
+            let mut stack = vec![tree.root];
+            while let Some(id) = stack.pop() {
+                if id >= alive.len() || alive[id] {
+                    continue;
+                }
+                alive[id] = true;
+                let key = construction_key(&tree, id, &root_key, &directory_keys);
+                index.insert(key.as_os_str(), id, &tree.nodes);
+                weights[id] = tree.nodes[id].size;
+                if tree.nodes[id].is_dir() {
+                    directory_keys.insert(id, key);
+                }
+                stack.extend(tree.nodes[id].children.iter().copied());
+            }
+        }
+        let skipped = HashMap::from([(tree.root, tree.stats.skipped)]);
+        let scan_append_ordered = ordered && index.len() == tree.nodes.len();
         Self {
             tree,
             weights,
@@ -97,7 +124,7 @@ impl LiveTree {
     }
 
     pub fn find(&self, path: &Path) -> Option<NodeId> {
-        self.index.get(path_key(path).as_os_str()).copied()
+        self.index.get(path_key(path).as_os_str(), &self.tree.nodes)
     }
 
     pub fn contains(&self, id: NodeId) -> bool {
@@ -265,7 +292,9 @@ impl LiveTree {
         }
         let mut unique = HashSet::with_capacity(nodes.len());
         for (offset, key) in keys.iter().enumerate() {
-            if self.index.contains_key(key.as_os_str()) || !unique.insert(key.as_os_str()) {
+            if self.index.get(key.as_os_str(), &self.tree.nodes).is_some()
+                || !unique.insert(key.as_os_str())
+            {
                 return Err(format!(
                     "Preview entry {}: the path is already present in this scan.",
                     start + offset
@@ -280,7 +309,6 @@ impl LiveTree {
         self.tree.nodes.reserve(nodes.len());
         self.weights.reserve(nodes.len());
         self.alive.reserve(nodes.len());
-        self.index.reserve(nodes.len());
         let mut summary = UpdateSummary {
             changed: nodes.len(),
             inspected: nodes.len() * 2,
@@ -297,7 +325,7 @@ impl LiveTree {
             self.tree.nodes.push(node);
             self.weights.push(weight);
             self.alive.push(true);
-            self.index.insert(key.into_os_string(), id);
+            self.index.insert(key.as_os_str(), id, &self.tree.nodes);
             self.tree.nodes[parent].children.push(id);
         }
 
@@ -470,8 +498,8 @@ impl LiveTree {
     fn adjust(
         &mut self,
         mut parent: Option<NodeId>,
-        old: (u64, u64),
-        new: (u64, u64),
+        mut old: (u64, u64),
+        mut new: (u64, u64),
         summary: &mut UpdateSummary,
     ) {
         if old == new {
@@ -480,12 +508,36 @@ impl LiveTree {
         while let Some(id) = parent {
             summary.inspected += 1;
             let grandparent = self.detach(id, summary);
-            self.tree.nodes[id].size = self.tree.nodes[id]
-                .size
-                .saturating_sub(old.0)
-                .saturating_add(new.0);
-            self.weights[id] = self.weights[id].saturating_sub(old.1).saturating_add(new.1);
+            let before = (self.tree.nodes[id].size, self.weights[id]);
+            self.tree.nodes[id].size = if before.0 == u64::MAX && old.0 > new.0 {
+                self.tree.nodes[id]
+                    .children
+                    .iter()
+                    .fold(0_u64, |sum, &child| {
+                        summary.inspected += 1;
+                        sum.saturating_add(self.tree.nodes[child].size)
+                    })
+            } else {
+                before.0.saturating_sub(old.0).saturating_add(new.0)
+            };
+            self.weights[id] = if before.1 == u64::MAX && old.1 > new.1 {
+                self.tree.nodes[id]
+                    .children
+                    .iter()
+                    .fold(0_u64, |sum, &child| {
+                        summary.inspected += 1;
+                        sum.saturating_add(self.weights[child])
+                    })
+            } else {
+                before.1.saturating_sub(old.1).saturating_add(new.1)
+            };
+            let after = (self.tree.nodes[id].size, self.weights[id]);
             self.attach(id, grandparent, summary);
+            if before == after {
+                break;
+            }
+            old = before;
+            new = after;
             parent = grandparent;
         }
     }
@@ -496,15 +548,14 @@ impl LiveTree {
         if !key.starts_with(&self.root_key) {
             return None;
         }
-        if let Some(&id) = self.index.get(key.as_os_str()) {
+        if let Some(id) = self.index.get(key.as_os_str(), &self.tree.nodes) {
             return self.tree.nodes[id].is_dir().then_some(id);
         }
         // Ancestors absent from a coalesced event batch may be inserted as
         // empty directories. Never turn an existing file/link into a parent.
         self.upsert(parent, EntryKind::Directory, 0, None, summary);
         self.index
-            .get(key.as_os_str())
-            .copied()
+            .get(key.as_os_str(), &self.tree.nodes)
             .filter(|&id| self.tree.nodes[id].is_dir())
     }
 
@@ -521,7 +572,7 @@ impl LiveTree {
             return;
         }
         summary.inspected += 1;
-        let existing = self.index.get(key.as_os_str()).copied();
+        let existing = self.index.get(key.as_os_str(), &self.tree.nodes);
         let parent = if key == self.root_key {
             None
         } else if let Some(id) = self.ensure_parent(path, summary) {
@@ -579,7 +630,7 @@ impl LiveTree {
             0
         };
         self.alive[id] = true;
-        self.index.insert(key.into_os_string(), id);
+        self.index.insert(key.as_os_str(), id, &self.tree.nodes);
         if kind != EntryKind::Directory {
             self.weights[id] = if self.filter.matches(&self.tree.nodes[id]) {
                 self.tree.nodes[id].size
@@ -598,8 +649,10 @@ impl LiveTree {
     }
 
     fn retire(&mut self, id: NodeId) {
-        self.index
-            .remove(path_key(&self.tree.nodes[id].path).as_os_str());
+        self.index.remove(
+            path_key(&self.tree.nodes[id].path).as_os_str(),
+            &self.tree.nodes,
+        );
         self.count(self.tree.nodes[id].kind, false);
         if let Some(skipped) = self.skipped.remove(&id) {
             self.tree.stats.skipped = self.tree.stats.skipped.saturating_sub(skipped);
@@ -650,7 +703,7 @@ impl LiveTree {
         } else {
             return;
         };
-        let existing = self.index.get(key.as_os_str()).copied();
+        let existing = self.index.get(key.as_os_str(), &self.tree.nodes);
         let old = existing
             .map(|id| (self.tree.nodes[id].size, self.weights[id]))
             .unwrap_or((0, 0));
@@ -661,7 +714,7 @@ impl LiveTree {
         let mut old_index = HashMap::with_capacity(old_ids.len());
         for &id in &old_ids {
             let old_key = path_key(&self.tree.nodes[id].path);
-            self.index.remove(old_key.as_os_str());
+            self.index.remove(old_key.as_os_str(), &self.tree.nodes);
             old_index.insert(old_key, id);
             self.count(self.tree.nodes[id].kind, false);
             if let Some(skipped) = self.skipped.remove(&id) {
@@ -729,7 +782,8 @@ impl LiveTree {
                 children,
             };
             self.alive[id] = true;
-            self.index.insert(path_key(&node.path).into_os_string(), id);
+            self.index
+                .insert(path_key(&node.path).as_os_str(), id, &self.tree.nodes);
             self.count(node.kind, true);
             summary.inspected += 1;
         }
@@ -772,6 +826,170 @@ impl LiveTree {
             (self.tree.nodes[id].size, self.weights[id]),
             summary,
         );
+    }
+}
+
+fn construction_key(
+    tree: &ScanTree,
+    id: NodeId,
+    root_key: &Path,
+    directory_keys: &HashMap<NodeId, PathBuf>,
+) -> PathBuf {
+    if id == tree.root {
+        return root_key.to_owned();
+    }
+    let node = &tree.nodes[id];
+    if let Some(parent) = node.parent
+        && let Some(parent_key) = directory_keys.get(&parent)
+        && let (Some(actual_parent), Some(name)) = (node.path.parent(), node.path.file_name())
+        && actual_parent.as_os_str() == tree.nodes[parent].path.as_os_str()
+    {
+        return child_key(parent_key, name);
+    }
+    path_key(&node.path)
+}
+
+const PATH_SHARDS: usize = 1024;
+type IndexShard = HashMap<u64, NodeId, BuildHasherDefault<IndexHasher>>;
+
+/// The input u64 is already randomized by a per-index RandomState. Avoid a
+/// second cryptographic hash while retaining standard HashMap collision checks.
+#[derive(Default, Debug)]
+struct IndexHasher(u64);
+impl Hasher for IndexHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = bytes.iter().fold(0xcbf29ce484222325, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    }
+}
+
+/// Compact, collision-safe identity index. Paths already live in Nodes; the
+/// index stores hashes and IDs rather than another allocation per full path.
+/// Small independent shards distribute growth instead of rehashing a million
+/// keys synchronously when a single global capacity boundary is crossed.
+#[derive(Debug)]
+struct PathIndex {
+    shards: Box<[IndexShard]>,
+    collisions: HashMap<u64, Vec<NodeId>>,
+    state: RandomState,
+    len: usize,
+}
+
+impl PathIndex {
+    fn with_capacity(capacity: usize) -> Self {
+        let per_shard = if capacity >= PATH_SHARDS {
+            capacity.div_ceil(PATH_SHARDS) + 8
+        } else {
+            0
+        };
+        let shards = (0..PATH_SHARDS)
+            .map(|_| IndexShard::with_capacity_and_hasher(per_shard, BuildHasherDefault::default()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            shards,
+            collisions: HashMap::new(),
+            state: RandomState::new(),
+            len: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn shard(hash: u64) -> usize {
+        ((hash >> 32) as usize) & (PATH_SHARDS - 1)
+    }
+    fn matches(nodes: &[Node], id: NodeId, key: &std::ffi::OsStr) -> bool {
+        nodes.get(id).is_some_and(|node| {
+            node.path.as_os_str() == key || path_key(&node.path).as_os_str() == key
+        })
+    }
+
+    fn get(&self, key: &std::ffi::OsStr, nodes: &[Node]) -> Option<NodeId> {
+        self.get_hashed(self.state.hash_one(key), key, nodes)
+    }
+
+    fn get_hashed(&self, hash: u64, key: &std::ffi::OsStr, nodes: &[Node]) -> Option<NodeId> {
+        let &first = self.shards[Self::shard(hash)].get(&hash)?;
+        if Self::matches(nodes, first, key) {
+            return Some(first);
+        }
+        self.collisions
+            .get(&hash)?
+            .iter()
+            .copied()
+            .find(|&id| Self::matches(nodes, id, key))
+    }
+
+    fn insert(&mut self, key: &std::ffi::OsStr, id: NodeId, nodes: &[Node]) {
+        self.insert_hashed(self.state.hash_one(key), key, id, nodes);
+    }
+
+    fn insert_hashed(&mut self, hash: u64, key: &std::ffi::OsStr, id: NodeId, nodes: &[Node]) {
+        let shard = Self::shard(hash);
+        let Some(&first) = self.shards[shard].get(&hash) else {
+            self.shards[shard].insert(hash, id);
+            self.len += 1;
+            return;
+        };
+        if Self::matches(nodes, first, key) {
+            self.shards[shard].insert(hash, id);
+            return;
+        }
+        let others = self.collisions.entry(hash).or_default();
+        if let Some(existing) = others
+            .iter_mut()
+            .find(|other| Self::matches(nodes, **other, key))
+        {
+            *existing = id;
+        } else {
+            others.push(id);
+            self.len += 1;
+        }
+    }
+
+    fn remove(&mut self, key: &std::ffi::OsStr, nodes: &[Node]) -> Option<NodeId> {
+        self.remove_hashed(self.state.hash_one(key), key, nodes)
+    }
+
+    fn remove_hashed(
+        &mut self,
+        hash: u64,
+        key: &std::ffi::OsStr,
+        nodes: &[Node],
+    ) -> Option<NodeId> {
+        let shard = Self::shard(hash);
+        let &first = self.shards[shard].get(&hash)?;
+        if Self::matches(nodes, first, key) {
+            if let Some(replacement) = self.collisions.get_mut(&hash).and_then(Vec::pop) {
+                self.shards[shard].insert(hash, replacement);
+                if self.collisions.get(&hash).is_some_and(Vec::is_empty) {
+                    self.collisions.remove(&hash);
+                }
+            } else {
+                self.shards[shard].remove(&hash);
+            }
+            self.len -= 1;
+            return Some(first);
+        }
+        let others = self.collisions.get_mut(&hash)?;
+        let position = others
+            .iter()
+            .position(|&id| Self::matches(nodes, id, key))?;
+        let removed = others.swap_remove(position);
+        if others.is_empty() {
+            self.collisions.remove(&hash);
+        }
+        self.len -= 1;
+        Some(removed)
     }
 }
 
@@ -1650,5 +1868,133 @@ mod tests {
         assert!(live.commit_filter(unchanged).is_err());
         assert_eq!(live.weights, weights);
         assert_eq!(live.weights[0], 30);
+    }
+
+    #[test]
+    fn compact_index_resolves_collisions_replaces_and_removes_exact_paths() {
+        let mut nodes = tree().nodes;
+        let mut index = PathIndex::with_capacity(0);
+        let hash = 0x1234_5678_9abc_def0;
+        let keys: Vec<_> = nodes.iter().map(|node| path_key(&node.path)).collect();
+        for (id, key) in keys.iter().enumerate() {
+            index.insert_hashed(hash, key.as_os_str(), id, &nodes);
+        }
+        assert_eq!(index.len(), keys.len());
+        for (id, key) in keys.iter().enumerate() {
+            assert_eq!(index.get_hashed(hash, key.as_os_str(), &nodes), Some(id));
+        }
+        nodes.push(nodes[2].clone());
+        index.insert_hashed(hash, keys[2].as_os_str(), 5, &nodes);
+        assert_eq!(index.len(), keys.len());
+        assert_eq!(index.get_hashed(hash, keys[2].as_os_str(), &nodes), Some(5));
+        assert_eq!(
+            index.remove_hashed(hash, keys[2].as_os_str(), &nodes),
+            Some(5)
+        );
+        assert_eq!(
+            index.remove_hashed(hash, keys[0].as_os_str(), &nodes),
+            Some(0)
+        );
+        for id in [1, 3, 4] {
+            assert_eq!(
+                index.get_hashed(hash, keys[id].as_os_str(), &nodes),
+                Some(id)
+            );
+            assert_eq!(
+                index.remove_hashed(hash, keys[id].as_os_str(), &nodes),
+                Some(id)
+            );
+        }
+        assert_eq!(index.len(), 0);
+        assert!(index.collisions.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn compact_index_preserves_distinct_invalid_utf16_and_reused_slots() {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        let root = std::env::temp_dir().join("space-sniffer-invalid-utf16-index");
+        let name = |surrogate| OsString::from_wide(&[b'f' as u16, surrogate, b'x' as u16]);
+        let first = root.join(name(0xd800));
+        let second = root.join(name(0xd801));
+        let mut nodes = vec![
+            node(&root, "", EntryKind::Directory, 3, None),
+            Node {
+                name: "lossy first".into(),
+                path: first.clone(),
+                kind: EntryKind::File,
+                size: 1,
+                children: Vec::new(),
+                parent: Some(0),
+                modified: None,
+            },
+            Node {
+                name: "lossy second".into(),
+                path: second.clone(),
+                kind: EntryKind::File,
+                size: 2,
+                children: Vec::new(),
+                parent: Some(0),
+                modified: None,
+            },
+        ];
+        nodes[0].path = root.clone();
+        nodes[0].children = vec![2, 1];
+        let mut live = LiveTree::new(ScanTree {
+            nodes,
+            root: 0,
+            stats: ScanStats {
+                files: 2,
+                directories: 1,
+                ..ScanStats::default()
+            },
+        });
+        assert_eq!(live.find(&first), Some(1));
+        assert_eq!(live.find(&second), Some(2));
+        live.apply(&[Change::Remove(first.clone())]);
+        let replacement = root.join("replacement.txt");
+        live.apply(&[upsert(replacement.clone(), 4)]);
+        assert_eq!(live.find(&replacement), Some(1));
+        assert_eq!(live.find(&first), None);
+        assert_eq!(live.find(&second), Some(2));
+        assert_eq!(live.tree.total_size(), 6);
+    }
+
+    #[test]
+    fn decreases_recompute_saturated_ancestors_and_filter_totals() {
+        let root = PathBuf::from("saturated-live-fixture");
+        let mut nodes = vec![
+            node(&root, "", EntryKind::Directory, u64::MAX, None),
+            node(&root, "dir", EntryKind::Directory, u64::MAX, Some(0)),
+            node(&root, "dir/a.txt", EntryKind::File, u64::MAX, Some(1)),
+            node(&root, "dir/b.txt", EntryKind::File, u64::MAX, Some(1)),
+            node(&root, "other.bin", EntryKind::File, 1, Some(0)),
+        ];
+        nodes[0].children = vec![1, 4];
+        nodes[1].children = vec![2, 3];
+        let mut live = LiveTree::new(ScanTree {
+            nodes,
+            root: 0,
+            stats: ScanStats {
+                files: 3,
+                directories: 2,
+                ..ScanStats::default()
+            },
+        });
+        live.set_filter("*.txt").unwrap();
+        live.apply(&[upsert(root.join("dir/a.txt"), 9)]);
+        assert_eq!(live.tree.nodes[1].size, u64::MAX);
+        assert_eq!(live.tree.total_size(), u64::MAX);
+        assert_eq!(live.weights[0], u64::MAX);
+        live.apply(&[Change::Remove(root.join("dir/a.txt"))]);
+        assert_eq!(live.tree.nodes[1].size, u64::MAX);
+        assert_eq!(live.tree.total_size(), u64::MAX);
+        assert_eq!(live.weights[0], u64::MAX);
+        live.apply(&[upsert(root.join("dir/b.txt"), 5)]);
+        assert_eq!(live.tree.nodes[1].size, 5);
+        assert_eq!(live.tree.total_size(), 6);
+        assert_eq!(live.weights[1], 5);
+        assert_eq!(live.weights[0], 5);
+        assert_eq!(live.tree.stats.files, 2);
     }
 }
