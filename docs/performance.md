@@ -1,6 +1,51 @@
 # Performance
 
-Space Sniffer 0.3 shows discovered data before the initial scan completes, while retaining parallel scanning and incremental live updates. The scanner uses up to eight directory workers and bounded batch queues. On Windows, `DirEntry::metadata()` reuses enumeration metadata; [Rust documents this optimization and its no-follow behavior](https://doc.rust-lang.org/std/fs/struct.DirEntry.html#method.metadata).
+Space Sniffer 0.4 profiles large-tree CPU costs separately from filesystem I/O. The initial map fills progressively, scanning uses up to eight directory workers, and queues stay bounded. On Windows, `DirEntry::metadata()` reuses enumeration metadata; [Rust documents this optimization and its no-follow behavior](https://doc.rust-lang.org/std/fs/struct.DirEntry.html#method.metadata).
+
+## Large-tree profiling in 0.4
+
+The following optimized Windows measurements compare 0.3.1 with the 0.4 changes. Synthetic fixtures are built in memory, without creating a million files on disk. Times exclude fixture construction and destruction unless the operation explicitly measures replacement. They do not measure cold storage, GPU work, or operating-system painting.
+
+| Operation | Before | After | Scope |
+| --- | ---: | ---: | --- |
+| Replace a million-entry UI model | 113.293 ms | 0.076 ms | UI call; old model destruction now runs on a background thread |
+| Dense 8,000-tile frame, rebuild geometry | 18.211 ms | 4.994 ms | Median of 21 CPU frames at 1920 × 1080, including egui shapes and tessellation |
+| Same dense map with cached geometry | 17.476 ms | 3.530 ms | Median of 21 CPU frames, including tessellation; not GPU presentation |
+| Million-entry glob and size filter | 164 ms | 17.3 ms | Complete in-memory model filter, measured synchronously for comparison |
+| Interactive million-entry filter | One synchronous call | 9 slices, longest 2.044 ms | Separate UI fixture; total filter CPU 17.890 ms; old weights remain visible until commit |
+| Select from a million tiny siblings | 1.646 ms | 0.681 ms | Median of 31 calls, known parent total, one aggregate tile |
+| Build a million-entry live index | 1,559 ms | 222.1 ms | Final run: median of 5 model constructions, excluding input cloning |
+| Append 8,192 discovered nodes, p95 | 6.00 ms | 3.98 ms | Streaming to one million files, including model growth |
+| Worst observed preview append | 125.24 ms | 16.46 ms | Same stream; old maximum was global index rehashing, new maximum was arena growth |
+
+The UI uses one combined fill/border shape per tile, square corners for tiny rectangles, cached colors, and no filename allocation for tiles too small to label. Its 8,000-tile cap reserves space for remaining siblings, preventing one deep branch from hiding later folders. Per-folder selection receives the already-known parent weight, makes one child pass, and returns the order geometry needs. No full-million-item geometry is constructed by the GUI. The unfiltered sidebar takes its first 100 rows directly; sparse filtered lists inspect at most 4,096 children per frame.
+
+The live path index stores randomized 64-bit hashes and node IDs in 1,024 independent shards. Actual node paths verify matches, with collision buckets preserving distinct identities. This removes the persistent extra normalized full-path allocation per entry and distributes index growth. Initial index construction reuses normalized parent prefixes. These are allocation/layout changes, not a measured total-process-memory claim. A contiguous `Vec<Node>` still occasionally grows: the 16.46 ms maximum copied the arena at 524,289 entries, from capacity 524,352 to 1,048,704. There is no hard upper bound on allocation latency or a promise that every frame stays below 16 ms. Only one tree-bearing event is applied per frame, keeping separate large chunks from accumulating in one UI turn.
+
+Above 32,768 entries, interactive filters inspect at most 1,024 nodes per step and yield after roughly 2 ms. A complete weight buffer is installed atomically. Input is still debounced; the active map remains available for inspection and navigation. Live-event application pauses while filtering so its source stays stable, then explicitly wakes delivery of queued events. Final large models with an active filter are prepared on a worker while the existing preview stays visible. A slice time is a cooperative budget, not a hard real-time deadline; allocation, scheduling, and a single expensive filename match can exceed it.
+
+The scanner now folds direct file bytes during batch merging, finalizes only directories, skips sorting already-ordered wide child lists, and caches compact size/ID sort entries for wide unsorted lists. Five rotated in-memory million-file runs gave these **finalization-phase medians**, excluding filesystem traversal and UI work:
+
+| Shape, observed scanner | 0.3.1 | 0.4 |
+| --- | ---: | ---: |
+| Flat, equal sizes and ordered names | 62.342 ms | 8.712 ms |
+| Flat, random sizes | 226.933 ms | 72.394 ms |
+| 1,000 directories, random sizes | 59.123 ms | 33.831 ms |
+
+Complete read-only scans of an existing Rust documentation tree (51,948 files, 1,447 directories, 657,292,993 logical bytes) improved more modestly: observed-scanner median **24.544 → 23.631 ms**, ordinary-scanner median **24.019 → 22.871 ms**, across eight rotated warm-metadata runs. Totals were identical. This is not a whole-drive result. Wide unsorted sorting uses temporary 16-byte-per-child buffers for ordinary scans or 32 bytes per child with observed merging; ordered wide directories avoid those buffers. Storage and antivirus settings were not controlled.
+
+Reproduce the CPU measurements from the repository root:
+
+```sh
+cargo test --locked --release --bin space-sniffer profile_million -- --ignored --nocapture
+cargo test --locked --release --bin space-sniffer profile_dense -- --ignored --nocapture
+cargo run --locked --release --example map_scale_bench
+cargo run --locked --release --example model_scale_bench -- 1000000 3
+cargo run --locked --release --example scanner_scale_bench -- 1000000 5
+cargo run --locked --release --example scanner_scale_bench -- --path EXISTING_DIRECTORY 8
+```
+
+The map benchmark includes a frozen 0.3.1 selector for same-process comparisons and checks byte/count equivalence. Dense GUI tests include shape creation and CPU tessellation; selector-only timings do not. The scanner benchmark measures finalization or a complete read-only scan depending on its arguments. Large subtree replacement, native-watcher setup, OS paint latency, true cold-cache disk throughput, and total process memory require separate measurement.
 
 ## Measured initial scans
 
