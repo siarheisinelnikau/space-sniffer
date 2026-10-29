@@ -1,5 +1,7 @@
 # Space Sniffer
 
+**FREE and open source for Windows.** No license fee. Released under the [MIT license](LICENSE).
+
 A native, live disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
 
 [Download Windows .exe](https://github.com/siarheisinelnikau/space-sniffer/releases/latest/download/space-sniffer.exe) · [Latest release](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
@@ -26,7 +28,7 @@ Large-tree work is measured separately from disk I/O: million-entry filtering ru
 
 Scanning reads filesystem metadata. The app has no file deletion feature or telemetry. Export writes only the report you choose to save.
 
-**Platform status:** built and tested locally on Windows. Linux and macOS build/test jobs are configured in CI; their desktop behavior has not yet been verified locally.
+**Platform status:** Windows is the supported desktop platform and the only official binary download. Linux and macOS have automated build/test checks, but their desktop behavior has not been verified by the maintainer. Experimental macOS porting work lives in the [`macos` branch](https://github.com/siarheisinelnikau/space-sniffer/tree/macos).
 
 ## Build and run
 
@@ -70,7 +72,9 @@ See the [eframe Linux prerequisites](https://docs.rs/crate/eframe/0.33.0). Runni
 
 ### macOS
 
-Install Rust and Xcode Command Line Tools (`xcode-select --install`), then run:
+macOS support is experimental. Use the dedicated [`macos` branch](https://github.com/siarheisinelnikau/space-sniffer/tree/macos) and its [porting guide](https://github.com/siarheisinelnikau/space-sniffer/blob/macos/docs/macos.md). The maintainer has no Mac available for manual GUI testing; a successful CI build does not establish desktop compatibility.
+
+Install Rust and Xcode Command Line Tools (`xcode-select --install`), then run from that branch:
 
 ```sh
 cargo run --locked --release -- "$HOME"
@@ -134,7 +138,7 @@ Filters apply to file basenames, ignoring case. Plain text matches a substring; 
 
 ## Contributing and license
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and manual verification, [docs/architecture.md](docs/architecture.md) for the module layout, and [docs/performance.md](docs/performance.md) for scanner benchmarks.
+Pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and manual verification, [docs/architecture.md](docs/architecture.md) for the module layout, and [docs/performance.md](docs/performance.md) for scanner benchmarks.
 
 ```sh
 cargo fmt --all -- --check
@@ -144,3 +148,7 @@ cargo build --locked --release
 ```
 
 Released under the [MIT license](LICENSE).
+
+### Help bring Space Sniffer to macOS
+
+Please base macOS-specific pull requests on the [`macos` branch](https://github.com/siarheisinelnikau/space-sniffer/tree/macos) and target `macos` when opening your PR. It contains the experimental port and its [build and testing guide](https://github.com/siarheisinelnikau/space-sniffer/blob/macos/docs/macos.md). The maintainer cannot manually test macOS, so contributions from Mac users are especially welcome: GUI testing, Finder integration, keyboard shortcuts, APFS and external-volume behavior, live updates, app bundles, and signing/notarization. Include your macOS version, Apple Silicon or Intel architecture, and what you actually tested. Shared improvements and Windows fixes should target `main`.
