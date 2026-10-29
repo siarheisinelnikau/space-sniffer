@@ -1,6 +1,6 @@
 # Performance
 
-Space Sniffer 0.2 reduces initial scan work and applies ordinary file changes incrementally. The scanner uses up to eight directory workers and bounded batch queues. On Windows, `DirEntry::metadata()` reuses enumeration metadata; [Rust documents this optimization and its no-follow behavior](https://doc.rust-lang.org/std/fs/struct.DirEntry.html#method.metadata).
+Space Sniffer 0.3 shows discovered data before the initial scan completes, while retaining parallel scanning and incremental live updates. The scanner uses up to eight directory workers and bounded batch queues. On Windows, `DirEntry::metadata()` reuses enumeration metadata; [Rust documents this optimization and its no-follow behavior](https://doc.rust-lang.org/std/fs/struct.DirEntry.html#method.metadata).
 
 ## Measured initial scans
 
@@ -46,6 +46,43 @@ rustc --edition=2024 -O examples/scan_bench.rs -o target/scan-bench/scan-bench
 These commands compare the current scanner's 1/2/4/8-worker modes. There is no `--baseline` argument. Reproducing the historical table additionally requires the captured previous scanner source in a comparison harness; timing a separate old executable includes startup and is a different measurement.
 
 Record the commit, OS, Rust version, storage type, root size/shape, worker count, cache procedure, antivirus conditions, repetitions, and median/range. Separate initial scanning from watcher latency and UI drawing.
+
+## Progressive observer overhead
+
+The observer API was compared with the unchanged pre-observer parallel scanner in the same optimized standalone process. Windows metadata was warm; values are medians of 11 runs with configuration order rotated. The mixed 20,000-file fixture is the one described above; the flat fixture has 100,000 32-byte files. Neither set measures UI work or a cold cache.
+
+| Fixture | Pre-observer progress API | Current progress API, no observer | No-op observer | Observer copying at most 8,192 new nodes per call |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed 20,000 files | 9.210 ms | 9.274 ms | 8.972 ms | 10.263 ms |
+| Flat 100,000 files | 60.069 ms | 59.572 ms | 59.431 ms | 60.455 ms |
+
+The normal and no-op paths remained close to the prior implementation within local timing variation. Bounded node copying added about one millisecond in these runs. This copy benchmark clears child lists and zeroes directory sizes, without cloning whole trees. It excludes transport waiting, preview indexing, map geometry, and window painting; those costs need separate measurement.
+
+Reproduce current no-observer/no-op/bounded-copy comparisons with the scanner benchmark built above:
+
+```powershell
+./target/scan-bench/scan-bench.exe --observe --generate 11
+./target/scan-bench/scan-bench.exe --observe --generate-flat 11
+```
+
+On Linux/macOS, use the same arguments with `./target/scan-bench/scan-bench`. `--generate-flat` creates and later removes an isolated temporary 100,000-file directory. The current example does not include the pre-observer source baseline; that historical column used the preserved comparison harness.
+
+## First drawable geometry before completion
+
+The release-mode [preview benchmark](../examples/preview_bench.rs) creates an isolated temporary directory containing 20,000 17-byte files. In one Windows run with warm filesystem metadata, the root seed/model was available after **1.336 ms**, the first positive-area treemap geometry after **2.105 ms**, and the authoritative full model after **48.645 ms**. That first geometry represented 513 nodes and 8,704 bytes. Three nonoverlapping preview chunks delivered an 8,705-node prefix, with at most 8,192 nodes per chunk, before the complete 20,001-node, 340,000-byte model replaced it.
+
+Timing begins before `start_live`. The first-geometry measurement includes preview delivery, model append, visible-item selection, and treemap layout. Final readiness includes construction of the authoritative `LiveTree`. Fixture creation is excluded. These are core and geometry measurements, **not** operating-system window paint, GPU, or displayed-frame latency; the run is not a whole-drive guarantee.
+
+```sh
+cargo run --locked --release --example preview_bench -- --startup
+cargo run --locked --release --example preview_bench -- --append-only
+```
+
+`--startup` without a path creates and removes its own fixture. An optional existing-directory argument is read only. `--append-only` measures applying a bounded chunk to an existing synthetic model, separately from scanning and layout; no arguments runs both benchmarks.
+
+In the separate model-only test, appending 8,192 nodes to an existing 100,001-node flat model took **5.179 ms median** and **5.642 ms p95** over 20 samples, with exactly 16,385 reported inspections per append. This includes chunk validation, path indexing, and arena allocation growth; baseline-model and incoming-chunk construction are excluded. It includes neither filesystem work nor window painting, and does not promise a particular frame time.
+
+The root seed is sent first, the first nonempty scan batch is offered immediately, and subsequent observer opportunities occur roughly every 100 ms. Preview publication never waits for a full UI queue; contiguous prefix chunks can lag the scanner, and the final model supersedes the remaining prefix. Preview counts therefore describe data already delivered to the map, not the scanner's full discovered total.
 
 ## Measured in-memory updates
 
