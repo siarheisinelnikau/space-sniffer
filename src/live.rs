@@ -442,6 +442,7 @@ impl Worker {
     }
 
     fn run(mut self) {
+        let _priority = scanner::BackgroundPriority::enter();
         self.install_watch();
         self.full_scan();
         while !self.cancelled() {

@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ['v*']
+  create:
 
 permissions:
   contents: read
@@ -16,39 +17,53 @@ env:
 
 jobs:
   build:
+    if: github.event_name == 'push' || (github.event.ref_type == 'branch' && startsWith(github.event.ref, 'codex/release-v'))
     name: Build Windows executable
     runs-on: windows-latest
+    outputs:
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      release_sha: ${{ steps.version.outputs.release_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'create' && github.event.ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
       - name: Verify release version
+        id: version
         shell: pwsh
+        env:
+          RELEASE_REF: ${{ github.event_name == 'create' && github.event.ref || github.ref_name }}
         run: |
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object name -eq 'space-sniffer').version
-          if ($env:GITHUB_REF_NAME -ne "v$version") {
-            throw "Release tag $env:GITHUB_REF_NAME must match package version v$version for in-app updates."
+          $releaseTag = $env:RELEASE_REF -replace '^codex/release-', ''
+          if ($releaseTag -ne "v$version") {
+            throw "Release ref $env:RELEASE_REF must match package version v$version for in-app updates."
           }
-          $notes = "docs/release-notes/$env:GITHUB_REF_NAME.md"
+          $notes = "docs/release-notes/$releaseTag.md"
           if (!(Test-Path -LiteralPath $notes -PathType Leaf) -or (Get-Item -LiteralPath $notes).Length -eq 0) {
             throw "Add verified English release notes at $notes before tagging."
           }
+          "release_tag=$releaseTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "release_sha=$(git rev-parse HEAD)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Test
         run: cargo test --locked --all-targets --target x86_64-pc-windows-msvc
       - name: Build release
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
       - name: Stage versioned executable
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          Copy-Item -LiteralPath target/x86_64-pc-windows-msvc/release/space-sniffer.exe -Destination "release/SpaceSniffer-$env:GITHUB_REF_NAME.exe"
+          Copy-Item -LiteralPath target/x86_64-pc-windows-msvc/release/space-sniffer.exe -Destination "release/SpaceSniffer-$env:RELEASE_TAG.exe"
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: windows-executable
-          path: release/SpaceSniffer-${{ github.ref_name }}.exe
+          path: release/SpaceSniffer-${{ steps.version.outputs.release_tag }}.exe
           if-no-files-found: error
 
   publish:
@@ -59,6 +74,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.release_sha }}
       - uses: actions/download-artifact@v4
         with:
           name: windows-executable
@@ -67,7 +84,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.build.outputs.release_sha }}
         run: |
           set -euo pipefail
           executable="release/SpaceSniffer-${RELEASE_TAG}.exe"
@@ -79,25 +97,14 @@ jobs:
             gh release edit "$RELEASE_TAG" --notes-file "$notes"
           else
             gh release create "$RELEASE_TAG" "$executable" \
-              --verify-tag --title "Space Sniffer $RELEASE_TAG" --notes-file "$notes"
+              --target "$RELEASE_SHA" --title "Space Sniffer $RELEASE_TAG" --notes-file "$notes"
           fi
-      - name: Keep the latest release only
+      - name: Verify release asset
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
         run: |
           set -euo pipefail
           asset=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
           test "$asset" = "SpaceSniffer-${RELEASE_TAG}.exe"
-          latest=$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name')
-          if [ "$latest" != "$RELEASE_TAG" ]; then
-            echo "Keeping newer release $latest; skipping cleanup for $RELEASE_TAG."
-            exit 0
-          fi
-          gh release list --limit 1000 --json tagName --jq '.[].tagName' > previous-releases.txt
-          while IFS= read -r previous_tag; do
-            if [ "$previous_tag" != "$RELEASE_TAG" ]; then
-              gh release delete "$previous_tag" --yes
-            fi
-          done < previous-releases.txt
