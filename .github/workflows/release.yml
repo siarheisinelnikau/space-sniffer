@@ -23,15 +23,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq 'space-sniffer').version
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag $env:GITHUB_REF_NAME must match package version v$version for in-app updates."
+          }
+          $notes = "docs/release-notes/$env:GITHUB_REF_NAME.md"
+          if (!(Test-Path -LiteralPath $notes -PathType Leaf) -or (Get-Item -LiteralPath $notes).Length -eq 0) {
+            throw "Add verified English release notes at $notes before tagging."
+          }
       - name: Test
         run: cargo test --locked --all-targets --target x86_64-pc-windows-msvc
       - name: Build release
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - name: Stage versioned executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item -LiteralPath target/x86_64-pc-windows-msvc/release/space-sniffer.exe -Destination "release/SpaceSniffer-$env:GITHUB_REF_NAME.exe"
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: windows-executable
-          path: target/x86_64-pc-windows-msvc/release/space-sniffer.exe
+          path: release/SpaceSniffer-${{ github.ref_name }}.exe
           if-no-files-found: error
 
   publish:
@@ -41,6 +58,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: windows-executable
@@ -51,11 +69,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+          executable="release/SpaceSniffer-${RELEASE_TAG}.exe"
+          notes="docs/release-notes/${RELEASE_TAG}.md"
+          test -s "$executable"
+          test -s "$notes"
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release/space-sniffer.exe --clobber
+            gh release upload "$RELEASE_TAG" "$executable" --clobber
+            gh release edit "$RELEASE_TAG" --notes-file "$notes"
           else
-            gh release create "$RELEASE_TAG" release/space-sniffer.exe \
-              --verify-tag --title "Space Sniffer $RELEASE_TAG" --generate-notes
+            gh release create "$RELEASE_TAG" "$executable" \
+              --verify-tag --title "Space Sniffer $RELEASE_TAG" --notes-file "$notes"
           fi
       - name: Keep the latest release only
         env:
@@ -65,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           asset=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
-          test "$asset" = "space-sniffer.exe"
+          test "$asset" = "SpaceSniffer-${RELEASE_TAG}.exe"
           latest=$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name')
           if [ "$latest" != "$RELEASE_TAG" ]; then
             echo "Keeping newer release $latest; skipping cleanup for $RELEASE_TAG."
