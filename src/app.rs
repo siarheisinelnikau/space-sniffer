@@ -21,6 +21,7 @@ const MUTED: Color32 = Color32::from_rgb(137, 153, 176);
 const ACCENT: Color32 = Color32::from_rgb(100, 207, 187);
 
 pub struct App {
+    updates_ui: crate::app_updates::Updates,
     ctx: egui::Context,
     model: LiveTree,
     live: Option<LiveHandle>,
@@ -76,6 +77,8 @@ impl App {
                 .insert(egui::TextStyle::Button, FontId::proportional(13.0));
         });
         let mut app = Self::empty(cc.egui_ctx.clone());
+        app.updates_ui = crate::app_updates::Updates::load(cc.storage);
+        app.updates_ui.startup(&cc.egui_ctx);
         if let Some(path) = path {
             app.begin_scan(path);
         }
@@ -109,6 +112,7 @@ impl App {
             stats: ScanStats::default(),
         };
         Self {
+            updates_ui: crate::app_updates::Updates::default(),
             ctx,
             model: LiveTree::new(tree),
             live: None,
@@ -611,6 +615,7 @@ impl App {
                     .id_salt("sidebar_scroll")
                     .show(ui, |ui| {
                         ui.label(RichText::new("SPACE / SNIFFER").size(17.0).strong());
+                        self.updates_ui.button(ui);
                         ui.add_space(6.0);
                         if ui
                             .add_sized(
@@ -1261,7 +1266,17 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.updates_ui.save(storage);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.updates_ui.poll() {
+            let root = self
+                .loaded
+                .then(|| self.model.tree.nodes[self.model.tree.root].path.clone());
+            self.updates_ui.restart(ctx, root.as_deref());
+        }
         self.poll_live();
         self.advance_filter();
         if let Some(changed) = self.query_changed {
@@ -1328,6 +1343,12 @@ impl eframe::App for App {
                 ui.label("Watcher errors trigger automatic recovery.");
                 ui.label("MIT licensed · No telemetry · No deletion actions");
             });
+        if self.updates_ui.window(ctx) {
+            let root = self
+                .loaded
+                .then(|| self.model.tree.nodes[self.model.tree.root].path.clone());
+            self.updates_ui.restart(ctx, root.as_deref());
+        }
     }
 }
 

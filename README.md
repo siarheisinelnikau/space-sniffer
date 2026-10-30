@@ -4,7 +4,7 @@
 
 A native, live disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
 
-[Download Windows .exe](https://github.com/siarheisinelnikau/space-sniffer/releases/latest/download/space-sniffer.exe) · [Latest release](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
+[Download Windows .exe](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
 
 ![Space Sniffer on Windows: compact sidebar and live nested disk usage map](docs/screenshot.png)
 
@@ -23,10 +23,11 @@ This is an independent implementation inspired by [SpaceSniffer by Uderzo Softwa
 - CSV export of the current subtree, with original and filtered byte counts.
 - Drive shortcuts, a root path field, and an empty start screen until you choose a location.
 - A command-line scan summary without opening a window.
+- Background GitHub update checks, release notes, and verified in-app updates for Windows x86-64.
 
 Large-tree work is measured separately from disk I/O: million-entry filtering runs in short UI slices, and the map aggregates small files instead of drawing millions of rectangles. A dense 8,000-tile CPU frame benchmark improved from roughly **18 ms to 5 ms**. See [benchmarks, methodology, and limits](docs/performance.md); these are local CPU measurements, not whole-drive or frame-rate guarantees.
 
-Scanning reads filesystem metadata. The app has no file deletion feature or telemetry. Export writes only the report you choose to save.
+Scanning reads filesystem metadata. The app has no file deletion feature or telemetry. Export writes the report you choose to save. Update checks contact GitHub; downloading and replacing the application require your action.
 
 **Platform status:** Windows is the supported desktop platform and the only official binary download. All platforms share the same codebase on `main`. Linux and macOS have automated build/test checks, but their desktop behavior has not been verified by the maintainer; macOS support remains experimental.
 
@@ -80,7 +81,21 @@ Install Rust and Xcode Command Line Tools (`xcode-select --install`), then run f
 cargo run --locked --release -- "$HOME"
 ```
 
-Download and run the standalone **space-sniffer.exe** from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). It needs no installation or extraction. Releases contain only the Windows x86-64 executable; Linux and macOS can be built from source. The latest release is kept; older release entries and their assets are removed after a successful upload, while Git tags and commit history remain available.
+Download and run the standalone Windows executable from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). New releases use **SpaceSniffer-vVERSION.exe**, such as `SpaceSniffer-v0.4.2.exe`; earlier releases used `space-sniffer.exe`. The file needs no installation or extraction. Releases contain one Windows x86-64 executable, so its name has no architecture suffix. Linux and macOS can be built from source. The latest release is kept; older release entries and their assets are removed after a successful upload, while Git tags and commit history remain available. See the [release naming and publishing rules](CONTRIBUTING.md#releases).
+
+## App updates
+
+The GUI checks the latest stable GitHub release once at startup, without blocking scanning or the interface. Click **Updates** beside the installed version in the sidebar, then **Check for updates** to check manually. This window also contains release notes, the release-page link, and the **Check for updates on startup** setting. Startup checking is enabled by default; turning it off saves the preference between launches and prevents startup update requests. Manual checking remains available. **Update available** appears in the sidebar when GitHub has a newer version. Command-line scans do not check for updates. Network failures and GitHub request limits appear in the updates window and can be retried; startup checks do not open result or error dialogs.
+
+On Windows x86-64, choose **Download and install**. The download runs in the background, shows progress, and can be cancelled. The app checks the exact size and GitHub's SHA-256 digest before offering **Install and restart**. Installation replaces the running executable at its existing path, then restarts the app and scans the current root again. The startup-check setting is stored per user and survives executable replacement; scanned files are not changed. Keep the executable in a folder you can write to; no administrator prompt is used. If restart fails, the updates window offers **Restart now**, and you can also close and reopen the app yourself.
+
+An interrupted download or checksum mismatch leaves the installed application unchanged. Temporary downloads are removed when discarded or the app closes. Releases without a SHA-256 digest or the expected Windows executable can be opened on GitHub for manual updating. Linux, macOS, and other architectures support release checks and the release-page link; in-app binary installation is limited to the officially distributed Windows x86-64 executable.
+
+The updater is built into the same portable executable. During installation it keeps a recovery copy, moves the running image aside, and uses a temporary copy of the application to clean up after the old process exits. The distributed download remains a single `.exe`; no separate updater installation is required. The in-app updater accepts both versioned assets and the legacy `space-sniffer.exe` name.
+
+![Space Sniffer Updates settings showing the installed version, startup-check preference, and manual update check](docs/updates.jpg)
+
+The Updates window on Windows, including the persistent startup-check setting.
 
 ## Explore a scan
 
