@@ -1,5 +1,27 @@
 # Performance
 
+## Windows CPU/GDI rendering in 0.4.2
+
+Windows now uses egui-winit, `egui_software_backend` 0.0.2 (egui 0.33.3), and softbuffer 0.4.8's GDI bitmap surface. The application does not create an OpenGL or DirectX rendering context. Linux/macOS keep their existing eframe graphics backend.
+
+The host uses `Wait`/`WaitUntil` when there is no work, coalesces active requests to at most 60 frames/s, and reuses its bitmap for native expose events. Scanning and checking updates no longer animate a spinner over the entire map. A background result uses a single delayed repaint instead of egui 0.33's two zero-delay settling frames. Minimized scans run bounded model work without building widgets, tessellating, or presenting new bitmaps. Windows filesystem workers use background CPU, I/O, and memory scheduling; the UI keeps normal scheduling.
+
+Local Windows release-mode checks on 2026-10-30/31:
+
+- An unchanged project map had identical UI-frame and presentation counters across repeated one-second activity samples. Quiet process CPU samples were 0% of one logical core at the timer's resolution; minimize/restore and worker wakeups produced small nonzero samples. This does not establish zero CPU use under every condition.
+- Minimize/restore testing showed flat presentation counters while minimized, including during a real C: scan. The native window continued responding and closed automatically after an 18-second bounded test. That was an interrupted initial scan, not a completed or atomic whole-drive result.
+- No `opengl32`, `d3d*`, `dxgi`, or Vulkan graphics modules were found in the sampled CPU-rendered process. The inspected filesystem worker threads had a lower base priority than the UI.
+- A synthetic 8,000-tile 1920×1080 benchmark, including geometry, egui tessellation and CPU rasterization, measured **10.420 ms median**, **11.627 ms p95**, and **11.789 ms maximum** across 25 measured frames after five warm-up frames. It excludes GDI presentation and filesystem work; previous geometry-only numbers below are a different measurement.
+- In the final bounded C: run, active windows typically presented about 20 frames/s as progress/preview results arrived, with no new presentations while minimized. Full frame timing includes GDI presentation and varied with tree growth: interval medians ranged roughly **9–34 ms**, with a measured maximum around **107 ms**. The old OpenGL path was not rerun on C: because the user reported desktop-wide freezing. Cache conditions differ across local runs, so these are verification observations, not a controlled whole-drive throughput comparison or a claim that every interaction stays below 16 ms.
+
+Reproduce CPU rasterization timing:
+
+```sh
+cargo test --locked --release --bin space-sniffer profile_dense_software_frames -- --ignored --nocapture
+```
+
+For opt-in native diagnostics, set `SPACE_SNIFFER_RENDER_TRACE` to a JSONL output path. A bounded writer records layout/raster/presentation timing and periodically samples cumulative activity counters without waking the UI. Build `--features diagnostics` to additionally enable `SPACE_SNIFFER_TEST_SECONDS` (1–120), `SPACE_SNIFFER_TEST_MINIMIZE`, and `SPACE_SNIFFER_TEST_DATA` for isolated native smoke checks. These test controls are absent from the normal release executable. Screenshots come directly from the CPU bitmap with `--features screenshots` and `EFRAME_SCREENSHOT_TO`; `SPACE_SNIFFER_SCREENSHOT_VIEW=updates` captures the real Updates window after its settling frame.
+
 Space Sniffer 0.4 profiles large-tree CPU costs separately from filesystem I/O. The initial map fills progressively, scanning uses up to eight directory workers, and queues stay bounded. On Windows, `DirEntry::metadata()` reuses enumeration metadata; [Rust documents this optimization and its no-follow behavior](https://doc.rust-lang.org/std/fs/struct.DirEntry.html#method.metadata).
 
 ## Large-tree profiling in 0.4

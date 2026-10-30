@@ -1,6 +1,6 @@
 # Architecture
 
-Space Sniffer 0.4 is a native Rust disk explorer with a progressively populated initial map, parallel scanning, and automatic filesystem updates. eframe hosts egui with Glow/OpenGL; rfd supplies file dialogs. The GUI starts empty until the user chooses a drive, folder, or root path. Controls and selection details share a compact, resizable left sidebar.
+Space Sniffer 0.4 is a native Rust disk explorer with a progressively populated initial map, parallel scanning, and automatic filesystem updates. Windows hosts egui with egui-winit, CPU rasterization, and a softbuffer GDI bitmap surface. Linux and macOS retain the eframe Glow/OpenGL host; rfd supplies file dialogs. The GUI starts empty until the user chooses a drive, folder, or root path. Controls and selection details share a compact, resizable left sidebar.
 
 ## Modules
 
@@ -9,6 +9,7 @@ Space Sniffer 0.4 is a native Rust disk explorer with a progressively populated 
 | `src/main.rs` | GUI/CLI arguments and native window startup |
 | `src/app.rs` | Sidebar, live events, navigation, cached geometry, filtering, drawing, and reveal commands |
 | `src/app_updates.rs` | Update window, background-worker lifecycle, progress, cancellation, and restart |
+| `src/software_host.rs` | Windows input/DPI integration, reactive frame scheduling, CPU rasterization, GDI presentation, compatible settings storage, and optional render diagnostics |
 | `src/platform/` | Isolated Windows/macOS/Unix adapters for root shortcuts, file-manager reveal, and console attachment |
 | `src/lib.rs` | Core library exports and binary-unit byte formatting |
 | `src/model.rs` | Node arena, entry kinds, parent/child IDs, and scan statistics |
@@ -57,6 +58,12 @@ The raw notification queue is bounded to 1,024 events, output to eight events, a
 
 The GUI applies at most one tree-bearing event per frame and yields after a cooperative 4 ms status/progress budget. This leaves input and drawing opportunities between preview chunks; an individual large allocation or subtree change can still take longer.
 
+The Windows host sleeps in `Wait` or `WaitUntil` after consuming a repaint, coalesces bursts to at most 60 active frames per second, and uses the retained bitmap for OS expose events. Background results use egui's single delayed repaint request; zero-delay requests deliberately schedule two settling frames in egui 0.33. Scan and update checks have static status indicators to avoid redrawing a large map just to animate a spinner. After a model event, another application frame is requested only when queued work remains. Interactive widget animation and timed input behavior keep their native egui deadlines.
+
+Minimized windows run bounded model/update work through `App::tick` without building widgets, tessellating, or rasterizing. Font/image texture deltas are retained until the next visible presentation. Restoring, resizing, or changing DPI invalidates the retained surface as needed. Native close requests pass through egui so executable installation can cancel closing; exiting cancels workers before dropping native resources. The CPU host reads and writes the previous eframe RON settings map at the same Windows path and preserves existing keys, UI memory, window geometry, and the startup-update preference.
+
+Windows filesystem workers enter `THREAD_MODE_BACKGROUND_BEGIN`, lowering CPU, disk, and memory scheduling priority on their own threads; an RAII guard restores prior scheduling on exit. The GUI thread retains foreground scheduling. Other platforms use a no-op guard. This affects resource competition, not filesystem permissions or the scanner's size semantics.
+
 Ordinary file events inspect metadata and produce `Upsert` or `Remove`. Created, renamed, or uncertain directory events rescan only the affected subtree with `ReplaceSubtree`. Lost events, pending overflow, and explicit watcher rescan requests trigger root reconciliation.
 
 Native setup failures or runtime errors publish a status change and switch to full snapshot polling every two seconds, retrying native watching every five seconds. Unchanged polling snapshots are suppressed. Polling is a recovery mode and can be expensive on a large root; notification support and network-share behavior depend on the platform/filesystem.
@@ -99,7 +106,7 @@ Desktop integrations live behind `src/platform/mod.rs`, with separate Windows, m
 
 Tests cover scan totals, serial/parallel equivalence, callback affinity, cancellation/backpressure, deep trees, hard links, junctions, incremental updates, watcher behavior, filters, CSV safety, navigation, and geometry. See [performance notes](performance.md) for reproducible timings and cache limits.
 
-CI checks formatting, Clippy, tests, and release builds on Windows, Linux, and both Apple Silicon and Intel macOS runners. The same check job serves every platform, with additional macOS steps to test the Python packager, stage an unsigned `.app`, and inspect its plist, executable permissions, and linked libraries. These bundles are not uploaded. Local desktop verification is on Windows; configured CI jobs do not establish desktop behavior elsewhere. Tags publish only the standalone Windows x86-64 MSVC `SpaceSniffer-vVERSION.exe`. The workflow checks the tag against the embedded package version, stages Cargo's internal executable under the versioned asset name, and publishes the matching `docs/release-notes/vVERSION.md` as its description. It verifies the upload before deleting older GitHub release entries and their assets, retaining Git tags and commit history. The executable is unsigned; Linux and macOS remain buildable from source.
+CI checks formatting, Clippy, tests, and release builds on Windows, Linux, and both Apple Silicon and Intel macOS runners. The same check job serves every platform, with additional macOS steps to test the Python packager, stage an unsigned `.app`, and inspect its plist, executable permissions, and linked libraries. These bundles are not uploaded. Local desktop verification is on Windows; configured CI jobs do not establish desktop behavior elsewhere. Tags, or the explicit creation of a matching `codex/release-vVERSION` branch, publish only the standalone Windows x86-64 MSVC `SpaceSniffer-vVERSION.exe`. The workflow checks the release ref against the embedded package version, stages Cargo's internal executable under the versioned asset name, and publishes the matching `docs/release-notes/vVERSION.md` as its description. It verifies the upload and preserves existing releases and assets. The executable is unsigned; Linux and macOS remain buildable from source.
 
 The GUI reads its startup-update preference from eframe's per-user persistent storage before starting a background GitHub check. Disabling that preference skips the startup request entirely; manual checking is independent. Downloads require a user action and must match the release size and SHA-256 digest. The updater prefers `SpaceSniffer-vVERSION.exe`, with compatibility for the former `space-sniffer.exe` assets. Windows installation keeps a recovery copy, replaces the running image using `self-replace`, and restarts from the original executable path with the current root. Scanned data and persisted settings are preserved.
 

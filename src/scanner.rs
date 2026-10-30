@@ -20,6 +20,45 @@ const DIRECTORY_BATCH_SIZE: usize = 512;
 const MAX_SCAN_WORKERS: usize = 8;
 const SORT_RUN_SIZE: usize = 32_768;
 
+/// Lower CPU, disk, and memory scheduling priority for background filesystem work.
+/// The UI thread never enters this mode; the guard restores the calling thread.
+pub(crate) struct BackgroundPriority {
+    #[cfg(target_os = "windows")]
+    active: bool,
+    _same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl BackgroundPriority {
+    pub(crate) fn enter() -> Self {
+        Self {
+            #[cfg(target_os = "windows")]
+            active: set_background_priority(0x0001_0000),
+            _same_thread: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_background_priority(mode: i32) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThread() -> *mut std::ffi::c_void;
+        fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+    }
+    // SAFETY: the pseudo-handle is valid for the calling thread, and BEGIN/END
+    // background processing modes act on that thread only. Failure is harmless.
+    unsafe { SetThreadPriority(GetCurrentThread(), mode) != 0 }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for BackgroundPriority {
+    fn drop(&mut self) {
+        if self.active {
+            set_background_priority(0x0002_0000);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ScanProgress {
     pub files: u64,
@@ -448,6 +487,7 @@ fn scan_directories<const OBSERVE: bool, O: FnMut(&ScanTree)>(
             let spawned = std::thread::Builder::new()
                 .name(format!("scan-directory-{worker}"))
                 .spawn_scoped(scope, move || {
+                    let _priority = BackgroundPriority::enter();
                     while let Ok(job) = inbox.recv() {
                         if cancel.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
                             break;
