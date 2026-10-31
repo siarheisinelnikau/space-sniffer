@@ -341,6 +341,13 @@ impl Worker {
                 // A separate callback avoids treating a root LastWriteTime
                 // notification from Windows' parent watch as a subtree change.
                 for ancestor in self.root.ancestors().skip(1) {
+                    #[cfg(target_os = "macos")]
+                    if ancestor.parent().is_none() {
+                        // Do not add a recursive FSEvents subscription to / as
+                        // an incidental parent watch. Explicitly scanning /
+                        // still installs the requested root watcher below.
+                        break;
+                    }
                     if fs::symlink_metadata(ancestor)
                         .is_ok_and(|metadata| metadata.is_dir() && !is_link(&metadata))
                     {
@@ -348,6 +355,11 @@ impl Worker {
                             Ok(()) => installed = true,
                             Err(error) => failure = Some(error.to_string()),
                         }
+                        // FSEvents filters nonrecursive notifications in its
+                        // callback. Stop at the nearest existing parent; the
+                        // root probe detects missing/recreated roots.
+                        #[cfg(target_os = "macos")]
+                        break;
                     }
                 }
                 self.watchers.push(parent_watcher);
@@ -872,6 +884,24 @@ mod tests {
             wake: Arc::new(|| {}),
         };
         (Worker::new(path.to_owned(), sink), receiver)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_watch_roots_resolve_ancestor_aliases_but_not_selected_links() {
+        use std::os::unix::fs::symlink;
+        let directory = Directory::new();
+        let alias = std::env::temp_dir().join(directory.0.file_name().unwrap());
+        assert_eq!(watch_root(alias.clone()), directory.0);
+        assert_eq!(
+            watch_root(alias.join("missing/deep")),
+            directory.0.join("missing/deep")
+        );
+
+        let link = directory.0.join("selected-link");
+        symlink(&directory.0, &link).unwrap();
+        assert_eq!(watch_root(link.clone()), link);
+        assert!(scanner::scan_path(&link, &AtomicBool::new(false)).is_err());
     }
 
     fn initial(worker: &mut Worker, receiver: &Receiver<LiveEvent>) -> LiveTree {

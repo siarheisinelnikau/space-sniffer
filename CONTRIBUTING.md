@@ -29,7 +29,7 @@ cargo build --locked --release
 
 For behavior changes, add a focused test covering a real regression or invariant. Keep filesystem tests isolated in temporary directories. Link and permission behavior differs by platform; state which checks ran and which were skipped. The scanner, live model, watcher, filter, export, and treemap modules have tests independent of the GUI.
 
-For interface changes, check the empty startup screen and a real scan. Verify arbitrary roots, drive shortcuts, the compact resizable left sidebar, folder zoom, breadcrumbs and history, `Ctrl+O`, optional `F5`, `Backspace`, Depth, Classic colors, filtering, and Stop. Create, write, rename, and delete files while the app is open; the view should update automatically. Keep a selection inside a changed or removed folder and check navigation recovery. Include a screenshot when it helps review a visual change.
+For interface changes, check the empty startup screen and a real scan. Verify arbitrary roots, drive shortcuts, the compact resizable left sidebar, folder zoom, breadcrumbs and history, `Ctrl+O` (`Cmd+O` on macOS), optional `F5`, `Backspace`, Depth, Classic colors, filtering, and Stop. Create, write, rename, and delete files while the app is open; the view should update automatically. Keep a selection inside a changed or removed folder and check navigation recovery. Include a screenshot when it helps review a visual change.
 
 For scanner changes, check cancellation, unreadable entries, zero-byte files, and directory totals. Preserve the existing treatment of logical sizes, hard links, symbolic links, and Windows reparse points unless the change explicitly revises that contract and its documentation.
 
@@ -53,12 +53,12 @@ Keep pull requests focused. Describe the user-visible behavior, why it changed, 
 
 ### macOS contributions
 
-Use the dedicated [`macos` branch](https://github.com/siarheisinelnikau/space-sniffer/tree/macos) as both your starting point and your PR base for macOS-specific work. Follow its [porting guide](https://github.com/siarheisinelnikau/space-sniffer/blob/macos/docs/macos.md). The maintainer has no Mac for manual desktop testing, so a successful build or CI run must not be described as verified GUI support. Please include macOS version, hardware architecture, commands run, observed results, and remaining problems. GUI verification, mounted-volume behavior, permissions, Finder integration, and app packaging/signing contributions are welcome. Shared fixes should target `main`; they can then be merged into `macos`.
+Use `main` as both your starting point and your PR base, including for macOS-specific work. Keep the scanner, model, filters, live-update pipeline, and interface shared; isolate native desktop behavior in `src/platform/` and use narrow conditional compilation where an OS backend requires it. Follow the [macOS guide](docs/macos.md) for building and packaging. The maintainer has no Mac for manual desktop testing, so a successful build or CI run must not be described as verified GUI support. Please include macOS version, hardware architecture, commands run, observed results, and remaining problems. GUI verification, mounted-volume behavior, permissions, Finder integration, and app packaging/signing contributions are welcome.
 
 ## Releases
 
 The release workflow runs on pushed tags matching `v*`, for example `v0.3.0`. Before tagging, update `Cargo.toml` and `Cargo.lock` together when changing the package version, run the checks above, and verify a real GUI scan on the supported local platform.
 
-CI checks Windows, Ubuntu 22.04, and macOS 15. The release workflow tests and builds Windows x86-64, then publishes only `space-sniffer.exe`, with no archive, installer, or extra release assets. After verifying the uploaded asset, it removes older GitHub release entries and assets; Git tags and commit history are retained. A rerun updates the executable on the existing release. Executables are not signed.
+CI checks Windows, Ubuntu 22.04, and macOS 15 on Apple Silicon and Intel. The macOS jobs run the shared Rust checks and validate local `.app` bundles without uploading them. The release workflow tests and builds Windows x86-64, then publishes only `space-sniffer.exe`, with no archive, installer, or extra release assets. After verifying the uploaded asset, it removes older GitHub release entries and assets; Git tags and commit history are retained. A rerun updates the executable on the existing release. Executables are not signed.
 
 Contributions are distributed under the [MIT license](LICENSE).
