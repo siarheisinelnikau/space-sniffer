@@ -1,0 +1,25 @@
+{"renderer":"CPU / Windows GDI"}
+{"kind":"activity","minimized":false,"presents":2,"seconds":1.0001798,"ui_frames":2,"visible":true}
+{"kind":"activity","minimized":false,"presents":2,"seconds":2.0028667,"ui_frames":2,"visible":true}
+{"kind":"activity","minimized":false,"presents":2,"seconds":3.0031811,"ui_frames":2,"visible":true}
+{"kind":"activity","minimized":false,"presents":2,"seconds":4.0136827,"ui_frames":2,"visible":true}
+{"kind":"activity","minimized":false,"presents":2,"seconds":5.0293617,"ui_frames":2,"visible":true}
+{"kind":"activity","minimized":false,"presents":2,"seconds":6.0311078,"ui_frames":2,"visible":true}
+{"kind":"activity","minimized":false,"presents":2,"seconds":7.0401084,"ui_frames":2,"visible":true}
+{"frame_max_ms":18.6839,"frame_median_ms":18.6839,"frame_p95_ms":3.5203,"frames":2,"present_median_ms":11.4513,"raster_median_ms":5.6293999999999995,"seconds":8.0000443,"ui_median_ms":1.5988}
+{"kind":"activity","minimized":true,"presents":2,"seconds":9.0050341,"ui_frames":4,"visible":true}
+{"kind":"activity","minimized":true,"presents":2,"seconds":10.0175715,"ui_frames":4,"visible":true}
+{"kind":"activity","minimized":true,"presents":2,"seconds":11.0326995,"ui_frames":4,"visible":true}
+{"kind":"activity","minimized":true,"presents":2,"seconds":12.0377036,"ui_frames":4,"visible":true}
+{"kind":"activity","minimized":true,"presents":2,"seconds":13.0477733,"ui_frames":4,"visible":true}
+{"kind":"activity","minimized":true,"presents":2,"seconds":14.0615495,"ui_frames":4,"visible":true}
+{"kind":"activity","minimized":true,"presents":2,"seconds":15.0720582,"ui_frames":4,"visible":true}
+{"frame_max_ms":5.3983,"frame_median_ms":5.3983,"frame_p95_ms":5.3983,"frames":1,"present_median_ms":0.35169999999999996,"raster_median_ms":2.166,"seconds":8.0054676,"ui_median_ms":0.1211}
+{"kind":"activity","minimized":false,"presents":4,"seconds":17.0133473,"ui_frames":6,"visible":true}
+{"kind":"activity","minimized":false,"presents":4,"seconds":18.028251,"ui_frames":6,"visible":true}
+{"kind":"activity","minimized":false,"presents":4,"seconds":19.0381707,"ui_frames":6,"visible":true}
+{"kind":"activity","minimized":false,"presents":4,"seconds":20.0464664,"ui_frames":6,"visible":true}
+{"kind":"activity","minimized":false,"presents":4,"seconds":21.0525542,"ui_frames":6,"visible":true}
+{"kind":"activity","minimized":false,"presents":4,"seconds":22.0651622,"ui_frames":6,"visible":true}
+{"kind":"activity","minimized":false,"presents":4,"seconds":23.074146,"ui_frames":6,"visible":true}
+{"frame_max_ms":4.9965,"frame_median_ms":4.9965,"frame_p95_ms":4.9965,"frames":1,"present_median_ms":0.3331,"raster_median_ms":4.3901,"seconds":7.9944574,"ui_median_ms":0.2717}

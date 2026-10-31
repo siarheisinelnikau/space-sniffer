@@ -12,6 +12,8 @@ The app watching a real project folder on Windows.
 
 This is an independent implementation inspired by [SpaceSniffer by Uderzo Software](https://www.uderzo.it/main_products/space_sniffer/). It is not affiliated with Uderzo Software and does not use the original application's source code or assets.
 
+The Windows executable now embeds the treemap application mark at 16, 20, 24, 32, 48, 64, 128 and 256px. Space Sniffer has no tray icon or background tray mode. `scripts/inspect-icons.ps1 -ExecutablePath target/release/space-sniffer.exe` verifies packaged resources and saves native light/dark proofs without starting the application.
+
 ## What works
 
 - Parallel background scanning with progress and cancellation, using up to eight directory workers.
@@ -33,7 +35,7 @@ Scanning reads filesystem metadata. The app has no file deletion feature or tele
 
 ## Build and run
 
-Install [Rust](https://www.rust-lang.org/tools/install) **1.88 or newer** with Cargo. The repository includes `Cargo.lock`; use `--locked` for reproducible dependency selection.
+Install [Rust](https://www.rust-lang.org/tools/install) **1.95 or newer** with Cargo. The repository includes `Cargo.lock`; use `--locked` for reproducible dependency selection. Keep the shared `rust-auto-updator` repository beside this checkout: Cargo resolves `../rust-auto-updator/crates/rust-auto-updator`. CI and release runners must provision that source before Cargo runs; this local extraction does not assume an unpublished remote URL.
 
 ### Windows
 
@@ -87,11 +89,11 @@ Download and run the standalone Windows executable from [GitHub Releases](https:
 
 The GUI checks the latest stable GitHub release once at startup, without blocking scanning or the interface. Click **Updates** beside the installed version in the sidebar, then **Check for updates** to check manually. This window also contains release notes, the release-page link, and the **Check for updates on startup** setting. Startup checking is enabled by default; turning it off saves the preference between launches and prevents startup update requests. Manual checking remains available. **Update available** appears in the sidebar when GitHub has a newer version. Command-line scans do not check for updates. Network failures and GitHub request limits appear in the updates window and can be retried; startup checks do not open result or error dialogs.
 
-On Windows x86-64, choose **Download and install**. The download runs in the background, shows progress, and can be cancelled. The app checks the exact size and GitHub's SHA-256 digest before offering **Install and restart**. Installation replaces the running executable at its existing path, then restarts the app and scans the current root again. The startup-check setting is stored per user and survives executable replacement; scanned files are not changed. Keep the executable in a folder you can write to; no administrator prompt is used. If restart fails, the updates window offers **Restart now**, and you can also close and reopen the app yourself.
+On Windows x86-64, choose **Download and install**. The download runs in the background, shows progress, and can be cancelled. The shared updater checks the exact size, SHA256SUMS manifest when supplied, GitHub's SHA-256 digest when supplied, and the Windows executable structure before offering **Install and restart**. Installation hands off to the verified new executable as a helper. It waits for this process to exit, replaces the executable at its existing path with a backup, then restarts the app and scans the current root again. The startup-check setting is stored per user and survives executable replacement; scanned files are not changed. Keep the executable in a folder you can write to; no administrator prompt is used. If preparing the helper fails, the app keeps running and shows an error. If launching the replacement fails, the helper restores the previous executable.
 
 An interrupted download or checksum mismatch leaves the installed application unchanged. Temporary downloads are removed when discarded or the app closes. Releases without a SHA-256 digest or the expected Windows executable can be opened on GitHub for manual updating. Linux, macOS, and other architectures support release checks and the release-page link; in-app binary installation is limited to the officially distributed Windows x86-64 executable.
 
-The updater is built into the same portable executable. During installation it keeps a recovery copy, moves the running image aside, and uses a temporary copy of the application to clean up after the old process exits. The distributed download remains a single `.exe`; no separate updater installation is required. The in-app updater accepts both versioned assets and the legacy `space-sniffer.exe` name.
+Release discovery, download verification and replacement are provided by the shared `rust-auto-updator` core. The updater is built into the same portable executable. During installation it keeps a recovery copy in a private `.space-sniffer-update-*` folder beside the app; cleanup starts only after the new native host presents its first frame. The distributed download remains a single `.exe`; no separate updater installation is required. The in-app updater accepts both versioned assets and the legacy `space-sniffer.exe` name. The shared core is MIT licensed; its notice is included in `licenses/rust-auto-updator.txt`.
 
 ![Space Sniffer Updates settings showing the installed version, startup-check preference, and manual update check](docs/updates.png)
 

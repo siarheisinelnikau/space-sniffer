@@ -1,0 +1,27 @@
+{
+  "executable": "E:\\work\\github\\space-sniffer\\target\\release\\space-sniffer.exe",
+  "sha256": "0bfac67a5694a6fbe9ea3b1677be11e5109f19c19787ad6e1c634d43958ee8bb",
+  "pid": 56120,
+  "logical_cpus": 20,
+  "graphics_modules": [],
+  "samples": [
+    {
+      "state": "visible-idle",
+      "sample_seconds": 4.0065203,
+      "one_core_percent": 0.0,
+      "machine_percent": 0.0
+    },
+    {
+      "state": "minimized-idle",
+      "sample_seconds": 4.0144128,
+      "one_core_percent": 0.0,
+      "machine_percent": 0.0
+    },
+    {
+      "state": "restored-idle",
+      "sample_seconds": 4.0065987,
+      "one_core_percent": 0.0,
+      "machine_percent": 0.0
+    }
+  ]
+}

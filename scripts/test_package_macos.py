@@ -31,6 +31,7 @@ class BundleTests(unittest.TestCase):
                     self.assertEqual(metadata["CFBundlePackageType"], "APPL")
                     self.assertEqual(metadata["CFBundleDevelopmentRegion"], "en")
                     self.assertEqual((app / "Contents/Resources/LICENSE").read_bytes(), (REPOSITORY / "LICENSE").read_bytes())
+                    self.assertEqual((app / "Contents/Resources/licenses/rust-auto-updator.txt").read_bytes(), (REPOSITORY / "licenses/rust-auto-updator.txt").read_bytes())
                     if os.name != "nt":
                         self.assertEqual(executable.stat().st_mode & 0o777, 0o755)
 

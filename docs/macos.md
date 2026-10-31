@@ -14,7 +14,7 @@ macOS is developed on `main` alongside Windows and Linux, using the same Rust ap
 
 ## Build on a Mac
 
-Install Rust 1.88+ with Cargo, Python 3.11+, and Apple's Command Line Tools (`xcode-select --install`). Clone the repository and build from `main`:
+Install Rust 1.95+ with Cargo, Python 3.11+, and Apple's Command Line Tools (`xcode-select --install`). Clone the repository and build from `main`:
 
 ```sh
 git switch main
