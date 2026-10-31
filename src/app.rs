@@ -1209,7 +1209,10 @@ impl App {
             let tile = &tiles[index];
             let id = tile.id;
             let node = &self.model.tree.nodes[id];
-            response.clone().on_hover_ui(|ui| {
+            // The canvas fills the panel, so anchor to the pointer instead of its edges.
+            response.clone().on_hover_ui_at_pointer(|ui| {
+                // Tiles share one tooltip; let it grow after hovering a shorter entry.
+                ui.set_max_width(ui.spacing().tooltip_width);
                 if tile.collapsed > 0 {
                     ui.strong(format!("{} smaller entries", tile.collapsed));
                     ui.small("Zoom into this folder or filter to inspect smaller files.");
@@ -1504,6 +1507,75 @@ fn color(node: &Node, classic: bool, level: usize) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_tooltip_stays_readable_and_inside_the_window() {
+        for size in [Vec2::new(800.0, 520.0), Vec2::new(1280.0, 760.0)] {
+            for corner in [
+                Align2::CENTER_CENTER,
+                Align2::LEFT_TOP,
+                Align2::RIGHT_BOTTOM,
+            ] {
+                let ctx = egui::Context::default();
+                ctx.style_mut(|style| {
+                    style.animation_time = 0.0;
+                    style.interaction.tooltip_delay = 0.0;
+                    style.interaction.show_tooltips_only_when_still = false;
+                });
+                let mut app = App::empty(ctx.clone());
+                let mut source = tree(0);
+                source.nodes.truncate(1);
+                let node = &mut source.nodes[0];
+                node.name = "a".into();
+                node.path = PathBuf::from("a");
+                node.kind = EntryKind::File;
+                node.children.clear();
+                app.install_model(LiveTree::new(source));
+                let screen = Rect::from_min_size(Pos2::ZERO, size);
+                let mut pointer = None;
+                for frame in 0..10 {
+                    if frame == 5 {
+                        // Simulate moving from a short entry to a long one on the same canvas.
+                        let node = &mut app.model.tree.nodes[0];
+                        node.name =
+                            "a_long_filename_with_underscores_and_no_spaces_latest.tsv.gz".into();
+                        node.path = PathBuf::from("downloads").join(&node.name);
+                    }
+                    let input = egui::RawInput {
+                        screen_rect: Some(screen),
+                        time: Some(frame as f64 * 0.1),
+                        events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                        ..Default::default()
+                    };
+                    let _ = ctx.run(input, |ctx| {
+                        app.sidebar(ctx);
+                        app.status(ctx);
+                        egui::CentralPanel::default().show(ctx, |ui| app.canvas(ui));
+                    });
+                    pointer = Some(
+                        corner.pos_in_rect(&app.map_cache.as_ref().unwrap().area.shrink(20.0)),
+                    );
+                }
+                let tooltips = ctx.memory(|mem| {
+                    mem.areas()
+                        .visible_layer_ids()
+                        .into_iter()
+                        .filter(|layer| layer.order == egui::Order::Tooltip)
+                        .collect::<Vec<_>>()
+                });
+                assert_eq!(tooltips.len(), 1, "window {size:?}, pointer {pointer:?}");
+                let tooltip = egui::AreaState::load(&ctx, tooltips[0].id).unwrap().rect();
+                assert!(
+                    tooltip.width() >= 250.0 && tooltip.height() < 200.0,
+                    "tooltip squeezed into a narrow column: {tooltip:?}"
+                );
+                assert!(
+                    screen.contains_rect(tooltip),
+                    "tooltip {tooltip:?} outside window {screen:?}"
+                );
+            }
+        }
+    }
 
     /// In-memory UI work only: no filesystem I/O, window, GPU, or OS paint.
     /// Run with `cargo test --release --bin space-sniffer profile_million -- --ignored --nocapture`.
