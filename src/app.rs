@@ -87,7 +87,13 @@ impl App {
         });
         let mut app = Self::empty(ctx.clone());
         app.updates_ui = crate::app_updates::Updates::load(storage);
-        app.updates_ui.startup(ctx);
+        let isolated =
+            cfg!(feature = "diagnostics") && std::env::var_os("SPACE_SNIFFER_TEST_DATA").is_some();
+        let capture =
+            cfg!(feature = "screenshots") && std::env::var_os("EFRAME_SCREENSHOT_TO").is_some();
+        if !isolated && !capture {
+            app.updates_ui.startup(ctx);
+        }
         if let Some(path) = path {
             app.begin_scan(path);
         }
@@ -1305,12 +1311,7 @@ impl App {
 
     /// Apply bounded background work even when the native window is minimized.
     pub fn tick(&mut self, ctx: &egui::Context) {
-        if self.updates_ui.poll() {
-            let root = self
-                .loaded
-                .then(|| self.model.tree.nodes[self.model.tree.root].path.clone());
-            self.updates_ui.restart(ctx, root.as_deref());
-        }
+        self.updates_ui.poll();
         self.poll_live();
         self.advance_filter();
         if let Some(changed) = self.query_changed {

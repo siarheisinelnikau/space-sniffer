@@ -9,7 +9,11 @@ mod software_host;
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let Some((args, cleanup)) =
+        space_sniffer::updater::route_arguments(std::env::args_os().skip(1).collect())?
+    else {
+        return Ok(());
+    };
     if args
         .first()
         .is_some_and(|arg| arg.to_string_lossy().starts_with('-'))
@@ -61,9 +65,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let path = args.first().map(PathBuf::from);
     #[cfg(target_os = "windows")]
-    software_host::run(path)?;
+    software_host::run(path, cleanup)?;
     #[cfg(not(target_os = "windows"))]
-    run_gpu(path)?;
+    {
+        let _ = cleanup;
+        run_gpu(path)?;
+    }
     Ok(())
 }
 

@@ -17,6 +17,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use winit::platform::windows::WindowExtWindows;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -75,6 +76,7 @@ struct SoftwareHost {
     storage: FileStore,
     error: Option<Box<dyn std::error::Error>>,
     trace: Option<FrameTrace>,
+    cleanup: Option<PathBuf>,
     #[cfg(feature = "screenshots")]
     screenshot: Option<PathBuf>,
     #[cfg(feature = "screenshots")]
@@ -115,6 +117,12 @@ impl SoftwareHost {
             event_loop,
             &builder,
         )?);
+        let icon = crate::app_icon();
+        window.set_taskbar_icon(Some(winit::window::Icon::from_rgba(
+            icon.rgba,
+            icon.width,
+            icon.height,
+        )?));
         let context = softbuffer::Context::new(event_loop.owned_display_handle())
             .map_err(|error| format!("Could not create the GDI drawing context: {error}"))?;
         let surface = softbuffer::Surface::new(&context, window.clone())
@@ -317,6 +325,9 @@ impl SoftwareHost {
             .present()
             .map_err(|error| format!("Could not display the GDI bitmap: {error}"))?;
         state.has_frame = true;
+        if let Some(directory) = self.cleanup.take() {
+            space_sniffer::updater::cleanup(directory);
+        }
         let show = !event_loop.exiting();
         #[cfg(feature = "screenshots")]
         let show = show && self.screenshot.is_none();
@@ -366,6 +377,10 @@ impl ApplicationHandler<Repaint> for SoftwareHost {
         }
         if matches!(event, WindowEvent::RedrawRequested) && state.has_frame {
             // OS expose events reuse the retained bitmap; they do not create a UI loop.
+            if state.window.is_minimized() == Some(true) || state.window.is_visible() == Some(false)
+            {
+                return;
+            }
             if let Err(error) = state
                 .surface
                 .buffer_mut()
@@ -612,7 +627,7 @@ impl Drop for FrameTrace {
     }
 }
 
-pub fn run(root: Option<PathBuf>) -> Result<()> {
+pub fn run(root: Option<PathBuf>, cleanup: Option<PathBuf>) -> Result<()> {
     let event_loop = EventLoop::<Repaint>::with_user_event().build()?;
     let context = egui::Context::default();
     let proxy = event_loop.create_proxy();
@@ -636,6 +651,7 @@ pub fn run(root: Option<PathBuf>) -> Result<()> {
         storage: FileStore::new(),
         error: None,
         trace: FrameTrace::new(),
+        cleanup,
         #[cfg(feature = "screenshots")]
         screenshot: std::env::var_os("EFRAME_SCREENSHOT_TO").map(PathBuf::from),
         #[cfg(feature = "screenshots")]

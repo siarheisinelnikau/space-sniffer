@@ -4,8 +4,7 @@ use space_sniffer::{
     updater::{self, Asset, Download, Release},
 };
 use std::{
-    path::{Path, PathBuf},
-    process::Command,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -29,7 +28,6 @@ enum Status {
 enum Event {
     Checked(Result<Option<Release>, String>),
     Downloaded(Result<Download, String>),
-    Installed(Result<PathBuf, String>),
 }
 
 pub(super) struct Updates {
@@ -42,7 +40,6 @@ pub(super) struct Updates {
     receiver: Option<Receiver<Event>>,
     cancelled: Arc<AtomicBool>,
     transferred: Arc<AtomicU64>,
-    executable: Option<PathBuf>,
 }
 
 impl Default for Updates {
@@ -57,7 +54,6 @@ impl Default for Updates {
             receiver: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             transferred: Arc::new(AtomicU64::new(0)),
-            executable: None,
         }
     }
 }
@@ -125,8 +121,8 @@ impl Updates {
         self.start(ctx, || Event::Checked(updater::check()));
     }
 
-    /// Returns true once an installed update is ready for the automatic restart.
-    pub fn poll(&mut self) -> bool {
+    /// Apply worker results. Installation still requires an explicit user action.
+    pub fn poll(&mut self) {
         let event = match self.receiver.as_ref().map(Receiver::try_recv) {
             Some(Ok(event)) => event,
             Some(Err(mpsc::TryRecvError::Disconnected)) => {
@@ -134,9 +130,9 @@ impl Updates {
                 self.status = Status::Idle;
                 self.error =
                     Some("The update worker stopped unexpectedly. Please try again.".into());
-                return false;
+                return;
             }
-            _ => return false,
+            _ => return,
         };
         self.receiver = None;
         match event {
@@ -153,11 +149,6 @@ impl Updates {
                 self.status = Status::Ready;
                 self.open = true;
             }
-            Event::Installed(Ok(executable)) => {
-                self.executable = Some(executable);
-                self.status = Status::Installed;
-                return true;
-            }
             Event::Checked(Err(error)) => {
                 self.status = Status::Idle;
                 self.error = Some(error);
@@ -166,12 +157,7 @@ impl Updates {
                 self.status = Status::Available;
                 self.error = Some(error);
             }
-            Event::Installed(Err(error)) => {
-                self.status = Status::Available;
-                self.error = Some(error);
-            }
         }
-        false
     }
 
     pub fn button(&mut self, ui: &mut egui::Ui) {
@@ -189,20 +175,22 @@ impl Updates {
     }
 
     pub fn restart(&mut self, ctx: &egui::Context, root: Option<&Path>) {
-        let Some(executable) = &self.executable else {
+        if self.status == Status::Installed {
+            return;
+        }
+        let Some(download) = &mut self.download else {
             return;
         };
-        let mut command = Command::new(executable);
-        if let Some(root) = root {
-            command.arg(root);
-        }
-        match command.spawn() {
-            Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        self.status = Status::Installing;
+        match download.handoff(root) {
+            Ok(()) => {
+                self.status = Status::Installed;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             Err(error) => {
+                self.status = Status::Ready;
                 self.open = true;
-                self.error = Some(format!(
-                    "The update is installed, but restart failed: {error}. Close and reopen the app, or try Restart now."
-                ));
+                self.error = Some(format!("Could not prepare the update restart: {error}"));
             }
         }
     }
@@ -268,8 +256,7 @@ impl Updates {
                         ui.label("Installing update…");
                     }
                     Status::Installed => {
-                        ui.label("Update installed. Restart to use the new version.");
-                        restart = ui.button("Restart now").clicked();
+                        ui.label("Restarting to install the verified update…");
                     }
                 }
                 if let Some(release) = &self.release {
@@ -285,11 +272,8 @@ impl Updates {
                     }
                     if self.status == Status::Ready {
                         ui.small("The app will replace its executable and restart. The current root will be scanned again.");
-                        if ui.button("Install and restart").clicked()
-                            && let Some(download) = self.download.take()
-                        {
-                            self.status = Status::Installing;
-                            self.start(ctx, move || Event::Installed(download.install()));
+                        if ui.button("Install and restart").clicked() {
+                            restart = true;
                         }
                     }
                     if let Some(release) = &self.release {
@@ -386,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_download_cannot_offer_installation_and_an_installed_update_restarts_once() {
+    fn a_failed_download_cannot_offer_installation() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let mut updates = Updates::default();
         updates.status = Status::Downloading;
@@ -394,20 +378,10 @@ mod tests {
         sender
             .send(Event::Downloaded(Err("checksum mismatch".into())))
             .unwrap();
-        assert!(!updates.poll());
+        updates.poll();
         assert!(updates.status == Status::Available);
         assert!(updates.download.is_none());
         assert_eq!(updates.error.as_deref(), Some("checksum mismatch"));
-
-        let (sender, receiver) = mpsc::sync_channel(1);
-        updates.status = Status::Installing;
-        updates.receiver = Some(receiver);
-        sender
-            .send(Event::Installed(Ok(PathBuf::from("application.exe"))))
-            .unwrap();
-        assert!(updates.poll());
-        assert!(!updates.poll());
-        assert!(updates.status == Status::Installed);
     }
 
     #[test]

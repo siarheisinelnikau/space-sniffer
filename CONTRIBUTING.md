@@ -6,7 +6,7 @@ This is an independent Rust implementation inspired by [Uderzo Software's SpaceS
 
 ## Set up
 
-Follow the platform prerequisites in [README.md](README.md). Use Rust 1.88 or newer and commit intentional `Cargo.lock` changes for dependency updates. The current local verification platform is Windows; reports from Linux and macOS are useful.
+Follow the platform prerequisites in [README.md](README.md). Use Rust 1.95 or newer and commit intentional `Cargo.lock` changes for dependency updates. The current local verification platform is Windows; reports from Linux and macOS are useful.
 
 ```sh
 cargo run --locked --release

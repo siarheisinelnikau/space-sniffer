@@ -56,6 +56,7 @@ def package(binary: Path, target: str, output: Path, repository: Path = REPOSITO
     executable.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
                      | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
     shutil.copyfile(license_file, resources / "LICENSE")
+    shutil.copytree(repository / "licenses", resources / "licenses")
     with (contents / "Info.plist").open("wb") as destination:
         plistlib.dump(metadata, destination, sort_keys=False)
     return app

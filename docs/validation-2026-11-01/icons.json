@@ -1,0 +1,87 @@
+{
+  "executable": "E:\\work\\github\\space-sniffer\\target\\release\\space-sniffer.exe",
+  "sha256": "0bfac67a5694a6fbe9ea3b1677be11e5109f19c19787ad6e1c634d43958ee8bb",
+  "scope": "Resource-only LoadImageW / DrawIconEx proof; application not launched; OS tray/window integration unverified",
+  "icons": [
+    {
+      "size": 16,
+      "visiblePixels": 256,
+      "alphaBounds": [
+        0,
+        0,
+        15,
+        15
+      ]
+    },
+    {
+      "size": 20,
+      "visiblePixels": 400,
+      "alphaBounds": [
+        0,
+        0,
+        19,
+        19
+      ]
+    },
+    {
+      "size": 24,
+      "visiblePixels": 576,
+      "alphaBounds": [
+        0,
+        0,
+        23,
+        23
+      ]
+    },
+    {
+      "size": 32,
+      "visiblePixels": 1024,
+      "alphaBounds": [
+        0,
+        0,
+        31,
+        31
+      ]
+    },
+    {
+      "size": 48,
+      "visiblePixels": 2304,
+      "alphaBounds": [
+        0,
+        0,
+        47,
+        47
+      ]
+    },
+    {
+      "size": 64,
+      "visiblePixels": 4096,
+      "alphaBounds": [
+        0,
+        0,
+        63,
+        63
+      ]
+    },
+    {
+      "size": 128,
+      "visiblePixels": 16384,
+      "alphaBounds": [
+        0,
+        0,
+        127,
+        127
+      ]
+    },
+    {
+      "size": 256,
+      "visiblePixels": 65536,
+      "alphaBounds": [
+        0,
+        0,
+        255,
+        255
+      ]
+    }
+  ]
+}
