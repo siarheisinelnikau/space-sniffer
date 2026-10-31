@@ -8,6 +8,7 @@ Space Sniffer 0.4 is a native Rust disk explorer with a progressively populated 
 | --- | --- |
 | `src/main.rs` | GUI/CLI arguments and native window startup |
 | `src/app.rs` | Sidebar, live events, navigation, cached geometry, filtering, drawing, and reveal commands |
+| `src/app_updates.rs` | Update window, background-worker lifecycle, progress, cancellation, and restart |
 | `src/platform/` | Isolated Windows/macOS/Unix adapters for root shortcuts, file-manager reveal, and console attachment |
 | `src/lib.rs` | Core library exports and binary-unit byte formatting |
 | `src/model.rs` | Node arena, entry kinds, parent/child IDs, and scan statistics |
@@ -18,6 +19,7 @@ Space Sniffer 0.4 is a native Rust disk explorer with a progressively populated 
 | `src/treemap.rs` | Squarified geometry independent of egui |
 | `src/map_items.rs` | Visible-item selection and aggregation of tiny siblings while preserving bytes |
 | `src/export.rs` | Validated iterative CSV subtree export |
+| `src/updater.rs` | GitHub release discovery, semantic-version comparison, bounded downloads, SHA-256 verification, and Windows executable replacement |
 
 ## Initial scan
 
@@ -97,6 +99,8 @@ Desktop integrations live behind `src/platform/mod.rs`, with separate Windows, m
 
 Tests cover scan totals, serial/parallel equivalence, callback affinity, cancellation/backpressure, deep trees, hard links, junctions, incremental updates, watcher behavior, filters, CSV safety, navigation, and geometry. See [performance notes](performance.md) for reproducible timings and cache limits.
 
-CI checks formatting, Clippy, tests, and release builds on Windows, Linux, and both Apple Silicon and Intel macOS runners. The same check job serves every platform, with additional macOS steps to test the Python packager, stage an unsigned `.app`, and inspect its plist, executable permissions, and linked libraries. These bundles are not uploaded. Local desktop verification is on Windows; configured CI jobs do not establish desktop behavior elsewhere. Tags publish only the standalone Windows x86-64 MSVC `space-sniffer.exe`. The workflow verifies its upload before deleting older GitHub release entries and their assets, retaining Git tags and commit history. The executable is unsigned; Linux and macOS remain buildable from source.
+CI checks formatting, Clippy, tests, and release builds on Windows, Linux, and both Apple Silicon and Intel macOS runners. The same check job serves every platform, with additional macOS steps to test the Python packager, stage an unsigned `.app`, and inspect its plist, executable permissions, and linked libraries. These bundles are not uploaded. Local desktop verification is on Windows; configured CI jobs do not establish desktop behavior elsewhere. Tags publish only the standalone Windows x86-64 MSVC `SpaceSniffer-vVERSION.exe`. The workflow checks the tag against the embedded package version, stages Cargo's internal executable under the versioned asset name, and publishes the matching `docs/release-notes/vVERSION.md` as its description. It verifies the upload before deleting older GitHub release entries and their assets, retaining Git tags and commit history. The executable is unsigned; Linux and macOS remain buildable from source.
+
+The GUI reads its startup-update preference from eframe's per-user persistent storage before starting a background GitHub check. Disabling that preference skips the startup request entirely; manual checking is independent. Downloads require a user action and must match the release size and SHA-256 digest. The updater prefers `SpaceSniffer-vVERSION.exe`, with compatibility for the former `space-sniffer.exe` assets. Windows installation keeps a recovery copy, replaces the running image using `self-replace`, and restarts from the original executable path with the current root. Scanned data and persisted settings are preserved.
 
 This independent implementation is inspired by [Uderzo Software's SpaceSniffer](https://www.uderzo.it/main_products/space_sniffer/) without affiliation or reuse of its code/assets. The project is [MIT licensed](../LICENSE).

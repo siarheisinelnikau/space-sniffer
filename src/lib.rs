@@ -7,6 +7,7 @@ pub mod map_items;
 pub mod model;
 pub mod scanner;
 pub mod treemap;
+pub mod updater;
 
 /// Format logical bytes using binary units.
 pub fn format_bytes(bytes: u64) -> String {
