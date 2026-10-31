@@ -3,6 +3,8 @@
 mod app;
 mod app_updates;
 mod platform;
+#[cfg(target_os = "windows")]
+mod software_host;
 
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 
@@ -58,6 +60,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Usage: space-sniffer [PATH] or space-sniffer --scan PATH".into());
     }
     let path = args.first().map(PathBuf::from);
+    #[cfg(target_os = "windows")]
+    software_host::run(path)?;
+    #[cfg(not(target_os = "windows"))]
+    run_gpu(path)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_gpu(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Space Sniffer")
@@ -69,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "Space Sniffer",
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, path)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(&cc.egui_ctx, cc.storage, path)))),
     )?;
     Ok(())
 }

@@ -101,7 +101,7 @@ impl Updates {
             .spawn(move || {
                 let event = task();
                 let _ = sender.send(event);
-                ctx.request_repaint();
+                ctx.request_repaint_after(Duration::from_millis(1));
             }) {
             Ok(_) => self.receiver = Some(receiver),
             Err(error) => {
@@ -219,7 +219,7 @@ impl Updates {
             Event::Downloaded(updater::download(&asset, &cancelled, |bytes| {
                 transferred.store(bytes, Ordering::Relaxed);
                 if painted.elapsed() >= Duration::from_millis(100) {
-                    wake.request_repaint();
+                    wake.request_repaint_after(Duration::from_millis(1));
                     painted = Instant::now();
                 }
             }))
@@ -244,10 +244,7 @@ impl Updates {
                         ui.label("Check GitHub for a newer version.");
                     }
                     Status::Checking => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Checking GitHub…");
-                        });
+                        ui.label("Checking GitHub…");
                     }
                     Status::Current => {
                         ui.label("You are using the latest version.");
@@ -268,10 +265,7 @@ impl Updates {
                         ui.label("Download verified. Ready to install.");
                     }
                     Status::Installing => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Installing update…");
-                        });
+                        ui.label("Installing update…");
                     }
                     Status::Installed => {
                         ui.label("Update installed. Restart to use the new version.");
@@ -316,13 +310,17 @@ impl Updates {
                 ui.hyperlink_to("GitHub Releases", updater::RELEASES_URL);
             });
         self.open = open;
+        self.guard_close(ctx);
+        restart
+    }
+
+    pub fn guard_close(&self, ctx: &egui::Context) {
         // Do not terminate the process in the middle of executable replacement.
         if self.status == Status::Installing
             && ctx.input(|input| input.viewport().close_requested())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
-        restart
     }
 }
 
@@ -335,6 +333,28 @@ impl Drop for Updates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pending_network_check_does_not_animate_the_map_behind_the_window() {
+        let ctx = egui::Context::default();
+        let mut updates = Updates::default();
+        updates.status = Status::Checking;
+        updates.open = true;
+        let mut delay = Duration::ZERO;
+        for frame in 0..10 {
+            let output = ctx.run(
+                egui::RawInput {
+                    time: Some(frame as f64),
+                    ..Default::default()
+                },
+                |ctx| {
+                    updates.window(ctx);
+                },
+            );
+            delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        }
+        assert_eq!(delay, Duration::MAX);
+    }
 
     #[derive(Default)]
     struct MemoryStorage(std::collections::HashMap<String, String>);

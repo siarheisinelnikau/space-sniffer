@@ -25,6 +25,7 @@ pub struct App {
     ctx: egui::Context,
     model: LiveTree,
     live: Option<LiveHandle>,
+    pending_live: Option<LiveEvent>,
     loaded: bool,
     loading: bool,
     partial: bool,
@@ -57,15 +58,23 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        storage: Option<&dyn eframe::Storage>,
+        path: Option<PathBuf>,
+    ) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = PANEL;
         visuals.window_fill = PANEL;
         visuals.extreme_bg_color = BG;
         visuals.selection.bg_fill = Color32::from_rgb(41, 90, 90);
         visuals.widgets.active.bg_fill = Color32::from_rgb(47, 97, 97);
-        cc.egui_ctx.set_visuals(visuals);
-        cc.egui_ctx.style_mut(|style| {
+        ctx.set_visuals(visuals);
+        ctx.style_mut(|style| {
+            #[cfg(feature = "screenshots")]
+            if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
+                style.animation_time = 0.0;
+            }
             style.spacing.item_spacing = Vec2::new(6.0, 5.0);
             style.spacing.button_padding = Vec2::new(8.0, 5.0);
             style.spacing.slider_width = 95.0;
@@ -76,9 +85,9 @@ impl App {
                 .text_styles
                 .insert(egui::TextStyle::Button, FontId::proportional(13.0));
         });
-        let mut app = Self::empty(cc.egui_ctx.clone());
-        app.updates_ui = crate::app_updates::Updates::load(cc.storage);
-        app.updates_ui.startup(&cc.egui_ctx);
+        let mut app = Self::empty(ctx.clone());
+        app.updates_ui = crate::app_updates::Updates::load(storage);
+        app.updates_ui.startup(ctx);
         if let Some(path) = path {
             app.begin_scan(path);
         }
@@ -93,6 +102,12 @@ impl App {
                     std::thread::sleep(Duration::from_millis(5));
                 }
             }
+        }
+        #[cfg(feature = "screenshots")]
+        match std::env::var("SPACE_SNIFFER_SCREENSHOT_VIEW").as_deref() {
+            Ok("updates") => app.updates_ui.open = true,
+            Ok("help") => app.help = true,
+            _ => {}
         }
         app
     }
@@ -116,6 +131,7 @@ impl App {
             ctx,
             model: LiveTree::new(tree),
             live: None,
+            pending_live: None,
             loaded: false,
             loading: false,
             partial: false,
@@ -163,7 +179,9 @@ impl App {
         self.path = path.to_string_lossy().into_owned();
         let ctx = self.ctx.clone();
         self.live = Some(live::start_live_with_wake(path, move || {
-            ctx.request_repaint()
+            // egui's zero-delay request adds a second settling frame. A queued
+            // model/progress result only needs the next frame that consumes it.
+            ctx.request_repaint_after(Duration::from_millis(1))
         }));
         self.loading = true;
         self.watching = false;
@@ -177,6 +195,9 @@ impl App {
     }
 
     fn stop(&mut self) {
+        if let Some(event) = self.pending_live.take() {
+            drop_in_background(event);
+        }
         if self.filter_job.take().is_some() {
             // Stopping/restarting a scan must not lose a requested filter
             // whose sliced computation has not committed yet.
@@ -241,7 +262,10 @@ impl App {
         }
         let budget = Instant::now();
         while let Some(live) = &self.live {
-            let result = live.receiver.try_recv();
+            let result = self
+                .pending_live
+                .take()
+                .map_or_else(|| live.receiver.try_recv(), Ok);
             let event = match result {
                 Ok(event) => event,
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -272,7 +296,15 @@ impl App {
             if changes_model {
                 // Merge at most one tree-bearing event per frame, leaving
                 // time for input and painting during a scan/event burst.
-                self.ctx.request_repaint();
+                // This frame already paints the changed model. Only request
+                // another frame when there is actual queued work to consume.
+                self.pending_live = self
+                    .live
+                    .as_ref()
+                    .and_then(|live| live.receiver.try_recv().ok());
+                if self.pending_live.is_some() {
+                    self.ctx.request_repaint_after(Duration::from_millis(1));
+                }
                 break;
             }
             if budget.elapsed() > Duration::from_millis(4) {
@@ -305,7 +337,7 @@ impl App {
             .spawn(move || {
                 let result = model.set_filter(&query).map(|()| model);
                 let _ = sender.send(result);
-                ctx.request_repaint();
+                ctx.request_repaint_after(Duration::from_millis(1));
             });
     }
 
@@ -669,7 +701,9 @@ impl App {
                         ui.separator();
                         ui.horizontal(|ui| {
                             if self.loading {
-                                ui.spinner();
+                                let (rect, _) =
+                                    ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                ui.painter().circle_filled(rect.center(), 3.0, ACCENT);
                                 ui.label(RichText::new("Scanning…").color(ACCENT));
                             } else if self.live.is_some() {
                                 let (rect, _) =
@@ -1058,7 +1092,6 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.32).max(15.0));
             if self.loading {
-                ui.spinner();
                 ui.heading("Scanning your files");
                 if let Some(progress) = &self.progress {
                     ui.label(format!(
@@ -1265,12 +1298,13 @@ impl App {
     }
 }
 
-impl eframe::App for App {
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+impl App {
+    pub fn save(&self, storage: &mut dyn eframe::Storage) {
         self.updates_ui.save(storage);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// Apply bounded background work even when the native window is minimized.
+    pub fn tick(&mut self, ctx: &egui::Context) {
         if self.updates_ui.poll() {
             let root = self
                 .loaded
@@ -1287,6 +1321,11 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(150) - elapsed);
             }
         }
+        self.updates_ui.guard_close(ctx);
+    }
+
+    pub fn draw(&mut self, ctx: &egui::Context) {
+        self.tick(ctx);
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.choose_folder();
         }
@@ -1349,6 +1388,17 @@ impl eframe::App for App {
                 .then(|| self.model.tree.nodes[self.model.tree.root].path.clone());
             self.updates_ui.restart(ctx, root.as_deref());
         }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        App::save(self, storage);
+    }
+
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.draw(ctx);
     }
 }
 
@@ -1528,6 +1578,117 @@ fn color(node: &Node, classic: bool, level: usize) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waiting_for_scan_progress_does_not_continuously_request_frames() {
+        let ctx = egui::Context::default();
+        let mut app = App::empty(ctx.clone());
+        app.install_model(LiveTree::new(tree(0)));
+        app.loading = true;
+        app.partial = true;
+        let mut delay = Duration::ZERO;
+        for frame in 0..10 {
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 760.0))),
+                    time: Some(frame as f64),
+                    ..Default::default()
+                },
+                |ctx| app.draw(ctx),
+            );
+            delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        }
+        assert_eq!(
+            delay,
+            Duration::MAX,
+            "Waiting for metadata must not animate the entire map"
+        );
+    }
+
+    #[test]
+    fn preview_queue_is_drained_without_requesting_an_empty_followup_frame() {
+        let ctx = egui::Context::default();
+        let mut app = App::empty(ctx.clone());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        app.live = Some(LiveHandle {
+            receiver,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        for _ in 0..5 {
+            let _ = ctx.run(Default::default(), |_| {});
+        }
+        let root = tree(0).nodes.remove(0);
+        sender
+            .send(LiveEvent::Preview {
+                start: 0,
+                nodes: vec![root],
+            })
+            .unwrap();
+        let output = ctx.run(Default::default(), |_| app.poll_live());
+        assert!(app.loaded);
+        assert_eq!(
+            output.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            Duration::MAX
+        );
+        sender.send(LiveEvent::Changes(Vec::new())).unwrap();
+        sender
+            .send(LiveEvent::Progress(ScanProgress {
+                files: 123,
+                ..Default::default()
+            }))
+            .unwrap();
+        let _ = ctx.run(Default::default(), |_| app.poll_live());
+        let _ = ctx.run(Default::default(), |_| app.poll_live());
+        assert_eq!(app.progress.as_ref().unwrap().files, 123);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "manual CPU rasterization benchmark"]
+    fn profile_dense_software_frames() {
+        use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
+        let ctx = egui::Context::default();
+        let mut app = App::empty(ctx.clone());
+        app.install_model(LiveTree::new(tiled_tree()));
+        let mut renderer = EguiSoftwareRender::new(ColorFieldOrder::Bgra);
+        let mut pixels = vec![[0_u8; 4]; 1920 * 1080];
+        let mut timings = Vec::new();
+        for frame in 0..30 {
+            app.invalidate();
+            let started = Instant::now();
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0))),
+                    events: vec![egui::Event::PointerMoved(Pos2::new(
+                        600.0 + frame as f32 * 13.0,
+                        400.0,
+                    ))],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.canvas(ui));
+                },
+            );
+            let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+            renderer.render(
+                &mut BufferMutRef::new(&mut pixels, 1920, 1080),
+                &primitives,
+                &output.textures_delta,
+                output.pixels_per_point,
+            );
+            if frame >= 5 {
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        timings.sort_by(f64::total_cmp);
+        println!(
+            "CPU rasterization, {} tiles, 1920x1080: median {:.3}ms p95 {:.3}ms max {:.3}ms (no GDI presentation)",
+            app.map_cache.as_ref().unwrap().tiles.len(),
+            timings[12],
+            timings[23],
+            timings[24]
+        );
+    }
 
     #[test]
     fn map_tooltip_stays_readable_and_inside_the_window() {

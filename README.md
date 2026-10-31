@@ -2,7 +2,7 @@
 
 **FREE and open source for Windows.** No license fee. Released under the [MIT license](LICENSE).
 
-A native, live disk usage explorer written in Rust with [eframe / egui](https://github.com/emilk/egui). Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
+A native, live disk usage explorer written in Rust with [egui](https://github.com/emilk/egui). Windows renders the interface on the CPU and presents it through GDI, without creating an OpenGL or DirectX context. Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
 
 [Download Windows .exe](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
 
@@ -81,7 +81,7 @@ Install Rust and Xcode Command Line Tools (`xcode-select --install`), then run f
 cargo run --locked --release -- "$HOME"
 ```
 
-Download and run the standalone Windows executable from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). New releases use **SpaceSniffer-vVERSION.exe**, such as `SpaceSniffer-v0.4.2.exe`; earlier releases used `space-sniffer.exe`. The file needs no installation or extraction. Releases contain one Windows x86-64 executable, so its name has no architecture suffix. Linux and macOS can be built from source. The latest release is kept; older release entries and their assets are removed after a successful upload, while Git tags and commit history remain available. See the [release naming and publishing rules](CONTRIBUTING.md#releases).
+Download and run the standalone Windows executable from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). New releases use **SpaceSniffer-vVERSION.exe**, such as `SpaceSniffer-v0.4.2.exe`; earlier releases used `space-sniffer.exe`. The file needs no installation or extraction. Releases contain one Windows x86-64 executable, so its name has no architecture suffix. Linux and macOS can be built from source. Publishing retains existing releases and assets. See the [release naming and publishing rules](CONTRIBUTING.md#releases).
 
 ## App updates
 
@@ -93,7 +93,7 @@ An interrupted download or checksum mismatch leaves the installed application un
 
 The updater is built into the same portable executable. During installation it keeps a recovery copy, moves the running image aside, and uses a temporary copy of the application to clean up after the old process exits. The distributed download remains a single `.exe`; no separate updater installation is required. The in-app updater accepts both versioned assets and the legacy `space-sniffer.exe` name.
 
-![Space Sniffer Updates settings showing the installed version, startup-check preference, and manual update check](docs/updates.jpg)
+![Space Sniffer Updates settings showing the installed version, startup-check preference, and manual update check](docs/updates.png)
 
 The Updates window on Windows, including the persistent startup-check setting.
 
@@ -105,7 +105,7 @@ During scanning, **Discovered so far** counts only data already shown on the map
 
 **Stop** cancels scanning or watching and keeps the current map. A stopped initial scan remains explicitly marked **Partial map**. **Export CSV** becomes available after the initial scan completes, so a preview cannot be mistaken for a full report. Restart the root or use an optional full rescan to finish a stopped scan.
 
-The left sidebar contains root selection, watcher status, filters, depth, colors, selection details, and export. **LIVE** indicates an active native watcher; status messages explain recovery or fallback behavior. The map is cached between relevant changes, and an idle watcher does not continuously redraw the window.
+The left sidebar contains root selection, watcher status, filters, depth, colors, selection details, and export. **LIVE** indicates an active native watcher; status messages explain recovery or fallback behavior. The map is cached between relevant changes, and an idle watcher does not continuously redraw the window. Scan and update status indicators wait for actual results instead of continuously animating the map. On Windows, minimized windows continue processing background results without rebuilding or painting the interface; restore redraws the current data. Filesystem workers use Windows background resource scheduling so foreground input and applications take priority.
 
 Large filters show **Filtering** progress while the previous filter stays visible. File events wait in a bounded queue until the result is installed; filesystem scanning continues. Small entries are grouped into a tile showing their combined bytes and count. Zoom or filter to inspect them.
 
