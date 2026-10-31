@@ -758,7 +758,10 @@ mod tests {
             if node.is_dir() {
                 assert_eq!(
                     node.size,
-                    node.children.iter().map(|&id| tree.nodes[id].size).sum()
+                    node.children
+                        .iter()
+                        .map(|&id| tree.nodes[id].size)
+                        .sum::<u64>()
                 );
             }
         }

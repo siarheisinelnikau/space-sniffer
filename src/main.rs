@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
+mod app_updates;
 mod platform;
 
 use std::{path::PathBuf, sync::atomic::AtomicBool};
