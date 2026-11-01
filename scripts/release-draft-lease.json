@@ -1,0 +1,19 @@
+{
+  "repository": "siarheisinelnikau/space-sniffer",
+  "release_id": 430819184,
+  "tag": "v0.5.0",
+  "name": "Space Sniffer v0.5.0",
+  "target": "2d70c3ce9ecfc2069d485cf6bdf5927a9d3dad0a",
+  "assets": [
+    {
+      "name": "SpaceSniffer-v0.5.0.exe",
+      "size": 7755776,
+      "digest": "sha256:77fcfea54aa34789bef5047bff7e5c9c5a544caab5c8168bd06e8619c7625578"
+    },
+    {
+      "name": "SHA256SUMS.txt",
+      "size": 90,
+      "digest": "sha256:370c1d80187cc665ce8d6cfae1c9e603968172d37392bbf453414ac7b7341e61"
+    }
+  ]
+}
