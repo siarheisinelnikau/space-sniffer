@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ['v*']
+    branches: ['codex/release-v*']
   create:
 
 permissions:
@@ -17,7 +18,7 @@ env:
 
 jobs:
   build:
-    if: github.event_name == 'push' || (github.event.ref_type == 'branch' && startsWith(github.event.ref, 'codex/release-v'))
+    if: (github.event_name == 'push' && (github.ref_type == 'tag' || !github.event.created)) || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'codex/release-v'))
     name: Build Windows executable
     runs-on: windows-latest
     outputs:
@@ -51,6 +52,8 @@ jobs:
           }
           "release_tag=$releaseTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "release_sha=$(git rev-parse HEAD)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Test draft recovery without GitHub requests
+        run: node --test scripts/test_publish_release.cjs
       - name: Test
         run: cargo test --locked --all-targets --target x86_64-pc-windows-msvc
       - name: Build release
@@ -91,48 +94,12 @@ jobs:
         with:
           name: windows-executable
           path: release
-      - name: Publish executable
+      - name: Resume only the owned draft and publish verified assets
+        uses: actions/github-script@v7
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
           RELEASE_SHA: ${{ needs.build.outputs.release_sha }}
-        run: |
-          set -euo pipefail
-          executable="release/SpaceSniffer-${RELEASE_TAG}.exe"
-          notes="docs/release-notes/${RELEASE_TAG}.md"
-          test -s "$executable"
-          test -s "$notes"
-          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            echo 'This version already has a release. Bump the version instead of replacing it.' >&2
-            exit 1
-          fi
-          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" > existing-tag.json 2>/dev/null; then
-            python3 -c 'import json, os; t=json.load(open("existing-tag.json"))["object"]; assert t["type"] == "commit" and t["sha"] == os.environ["RELEASE_SHA"], "Existing tag belongs to another commit"'
-          fi
-          (cd release && sha256sum --check SHA256SUMS.txt)
-          gh release create "$RELEASE_TAG" --draft \
-            --target "$RELEASE_SHA" --title "Space Sniffer $RELEASE_TAG" --notes-file "$notes"
-          gh release upload "$RELEASE_TAG" "$executable" release/SHA256SUMS.txt
-          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > uploaded-assets.json
-          python3 - <<'PY'
-          import hashlib, json, os
-          assets = json.load(open('uploaded-assets.json'))['assets']
-          for name in [f'SpaceSniffer-{os.environ["RELEASE_TAG"]}.exe', 'SHA256SUMS.txt']:
-              matches = [asset for asset in assets if asset['name'] == name]
-              data = open(f'release/{name}', 'rb').read()
-              assert len(matches) == 1 and matches[0]['size'] == len(data)
-              assert matches[0]['digest'] == 'sha256:' + hashlib.sha256(data).hexdigest()
-          assert len(assets) == 2
-          PY
-          gh release edit "$RELEASE_TAG" --draft=false --latest
-      - name: Verify release asset
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-          asset=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
-          expected=$(printf '%s\n' "SpaceSniffer-${RELEASE_TAG}.exe" 'SHA256SUMS.txt' | sort)
-          test "$(printf '%s\n' "$asset" | sort)" = "$expected"
+        with:
+          script: |
+            const publish = require('./scripts/publish_release.cjs');
+            await publish({github, context, core});
