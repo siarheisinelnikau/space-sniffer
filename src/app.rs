@@ -3,6 +3,7 @@ use eframe::egui::{
 };
 use space_sniffer::{
     export, format_bytes,
+    i18n::{Language, Preferences, Theme},
     live::{self, Change, LiveEvent, LiveHandle},
     live_tree::{FilterJob, LiveTree},
     model::{EntryKind, Node, ScanStats, ScanTree},
@@ -15,12 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const BG: Color32 = Color32::from_rgb(17, 22, 32);
-const PANEL: Color32 = Color32::from_rgb(23, 30, 42);
-const MUTED: Color32 = Color32::from_rgb(137, 153, 176);
-const ACCENT: Color32 = Color32::from_rgb(100, 207, 187);
-
 pub struct App {
+    preferences: Preferences,
     updates_ui: crate::app_updates::Updates,
     ctx: egui::Context,
     model: LiveTree,
@@ -63,13 +60,8 @@ impl App {
         storage: Option<&dyn eframe::Storage>,
         path: Option<PathBuf>,
     ) -> Self {
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = PANEL;
-        visuals.window_fill = PANEL;
-        visuals.extreme_bg_color = BG;
-        visuals.selection.bg_fill = Color32::from_rgb(41, 90, 90);
-        visuals.widgets.active.bg_fill = Color32::from_rgb(47, 97, 97);
-        ctx.set_visuals(visuals);
+        let preferences = Preferences::load(storage);
+        preferences.theme.apply(ctx);
         ctx.style_mut(|style| {
             #[cfg(feature = "screenshots")]
             if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
@@ -86,6 +78,23 @@ impl App {
                 .insert(egui::TextStyle::Button, FontId::proportional(13.0));
         });
         let mut app = Self::empty(ctx.clone());
+        app.preferences = preferences;
+        #[cfg(feature = "screenshots")]
+        {
+            if let Ok(code) = std::env::var("SPACE_SNIFFER_SCREENSHOT_LANGUAGE")
+                && let Some(language) = Language::from_code(&code)
+            {
+                app.preferences.language = language;
+            }
+            if let Ok(theme) = std::env::var("SPACE_SNIFFER_SCREENSHOT_THEME") {
+                app.preferences.theme = match theme.as_str() {
+                    "light" => Theme::Light,
+                    "dark" => Theme::Dark,
+                    _ => app.preferences.theme,
+                };
+                app.preferences.theme.apply(ctx);
+            }
+        }
         app.updates_ui = crate::app_updates::Updates::load(storage);
         let isolated =
             cfg!(feature = "diagnostics") && std::env::var_os("SPACE_SNIFFER_TEST_DATA").is_some();
@@ -133,6 +142,7 @@ impl App {
             stats: ScanStats::default(),
         };
         Self {
+            preferences: Preferences::default(),
             updates_ui: crate::app_updates::Updates::default(),
             ctx,
             model: LiveTree::new(tree),
@@ -223,8 +233,9 @@ impl App {
     }
 
     fn choose_folder(&mut self) {
+        let language = self.preferences.language;
         if let Some(path) = rfd::FileDialog::new()
-            .set_title("Choose any drive or folder to watch")
+            .set_title(language.text("Choose any drive or folder to watch"))
             .pick_folder()
         {
             self.begin_scan(path);
@@ -629,10 +640,11 @@ impl App {
     }
 
     fn export(&mut self) {
+        let language = self.preferences.language;
         if let Some(path) = rfd::FileDialog::new()
-            .set_title("Export disk usage report")
+            .set_title(language.text("Export disk usage report"))
             .set_file_name("space-sniffer.csv")
-            .add_filter("CSV report", &["csv"])
+            .add_filter(language.text("CSV report"), &["csv"])
             .save_file()
         {
             match export::write_csv(&path, &self.model.tree, self.zoom, &self.model.weights) {
@@ -643,23 +655,65 @@ impl App {
     }
 
     fn sidebar(&mut self, ctx: &egui::Context) {
+        let language = self.preferences.language;
+        let palette = self.preferences.theme.palette();
         egui::SidePanel::left("sidebar")
             .default_width(224.0)
             .width_range(204.0..=320.0)
             .resizable(true)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(12))
+            .frame(egui::Frame::new().fill(palette.panel).inner_margin(12))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("sidebar_scroll")
                     .show(ui, |ui| {
                         ui.label(RichText::new("SPACE / SNIFFER").size(17.0).strong());
-                        self.updates_ui.button(ui);
+                        self.updates_ui.button(ui, language);
+                        ui.add_space(6.0);
+                        ui.label(language.text("Language"));
+                        let old_language = self.preferences.language;
+                        egui::ComboBox::from_id_salt("interface_language")
+                            .width(ui.available_width())
+                            .selected_text(self.preferences.language.name())
+                            .show_ui(ui, |ui| {
+                                for choice in Language::ALL {
+                                    ui.selectable_value(
+                                        &mut self.preferences.language,
+                                        choice,
+                                        choice.name(),
+                                    );
+                                }
+                            });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(language.text("Theme"));
+                            let old_theme = self.preferences.theme;
+                            ui.selectable_value(
+                                &mut self.preferences.theme,
+                                Theme::Light,
+                                language.text("Light"),
+                            );
+                            ui.selectable_value(
+                                &mut self.preferences.theme,
+                                Theme::Dark,
+                                language.text("Dark"),
+                            );
+                            if self.preferences.theme != old_theme {
+                                self.preferences.theme.apply(ctx);
+                            }
+                        });
+                        if self.preferences.language != old_language {
+                            ctx.request_repaint();
+                        }
+                        ui.separator();
                         ui.add_space(6.0);
                         if ui
                             .add_sized(
                                 [ui.available_width(), 30.0],
-                                egui::Button::new(RichText::new("Open folder…").strong().color(BG))
-                                    .fill(ACCENT),
+                                egui::Button::new(
+                                    RichText::new(language.text("Open folder…"))
+                                        .strong()
+                                        .color(palette.on_accent),
+                                )
+                                .fill(palette.accent),
                             )
                             .clicked()
                         {
@@ -679,11 +733,15 @@ impl App {
                                 }
                             }
                         });
-                        ui.label(RichText::new("ROOT PATH").small().color(MUTED));
+                        ui.label(
+                            RichText::new(language.text("ROOT PATH"))
+                                .small()
+                                .color(palette.muted),
+                        );
                         let response = ui.add_sized(
                             [ui.available_width(), 27.0],
                             egui::TextEdit::singleline(&mut self.path)
-                                .hint_text("Any drive, folder or network path"),
+                                .hint_text(language.text("Any drive, folder or network path")),
                         );
                         let enter =
                             response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -691,7 +749,7 @@ impl App {
                             if (ui
                                 .add_enabled(
                                     !self.path.trim().is_empty(),
-                                    egui::Button::new("Watch root"),
+                                    egui::Button::new(language.text("Watch root")),
                                 )
                                 .clicked()
                                 || enter)
@@ -699,7 +757,7 @@ impl App {
                             {
                                 self.begin_scan(PathBuf::from(self.path.trim()));
                             }
-                            if self.live.is_some() && ui.button("Stop").clicked() {
+                            if self.live.is_some() && ui.button(language.text("Stop")).clicked() {
                                 self.stop();
                                 self.watch_status = "Stopped".into();
                             }
@@ -709,72 +767,92 @@ impl App {
                             if self.loading {
                                 let (rect, _) =
                                     ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                                ui.painter().circle_filled(rect.center(), 3.0, ACCENT);
-                                ui.label(RichText::new("Scanning…").color(ACCENT));
+                                ui.painter()
+                                    .circle_filled(rect.center(), 3.0, palette.accent);
+                                ui.label(
+                                    RichText::new(language.text("Scanning…")).color(palette.accent),
+                                );
                             } else if self.live.is_some() {
                                 let (rect, _) =
                                     ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                                ui.painter().circle_filled(rect.center(), 3.0, ACCENT);
+                                ui.painter()
+                                    .circle_filled(rect.center(), 3.0, palette.accent);
                                 ui.label(
-                                    RichText::new(if self.watching { "LIVE" } else { "AUTO" })
-                                        .strong()
-                                        .color(ACCENT),
+                                    RichText::new(if self.watching {
+                                        language.text("LIVE")
+                                    } else {
+                                        language.text("AUTO")
+                                    })
+                                    .strong()
+                                    .color(palette.accent),
                                 );
                             } else {
                                 ui.label(
                                     RichText::new(if self.loaded {
-                                        "Stopped"
+                                        language.text("Stopped")
                                     } else {
-                                        "Choose a root"
+                                        language.text("Choose a root")
                                     })
-                                    .color(MUTED),
+                                    .color(palette.muted),
                                 );
                             }
                         });
                         if !self.watch_status.is_empty() {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(&self.watch_status).small().color(MUTED),
+                                    RichText::new(language.message(&self.watch_status))
+                                        .small()
+                                        .color(palette.muted),
                                 )
                                 .wrap(),
                             );
                         }
                         if self.loading {
                             if let Some(progress) = &self.progress {
-                                ui.label(format!(
-                                    "Found {} files · {}",
-                                    progress.files,
-                                    format_bytes(progress.bytes)
+                                ui.label(language.format(
+                                    "Found {0} files · {1}",
+                                    &[&progress.files, &format_bytes(progress.bytes)],
                                 ));
                                 ui.add(
                                     egui::Label::new(
                                         RichText::new(progress.current_path.to_string_lossy())
                                             .small()
-                                            .color(MUTED),
+                                            .color(palette.muted),
                                     )
                                     .truncate(),
                                 );
                             }
                         } else if self.loaded {
                             if self.partial {
-                                ui.label(RichText::new("Discovered so far").small().color(MUTED));
+                                ui.label(
+                                    RichText::new(language.text("Discovered so far"))
+                                        .small()
+                                        .color(palette.muted),
+                                );
                             }
                             ui.label(
                                 RichText::new(format_bytes(self.model.tree.total_size()))
                                     .size(25.0)
-                                    .color(ACCENT),
+                                    .color(palette.accent),
                             );
                             ui.label(
-                                RichText::new(format!(
-                                    "{} files · {} folders",
-                                    self.model.tree.stats.files, self.model.tree.stats.directories
+                                RichText::new(language.format(
+                                    "{0} files · {1} folders",
+                                    &[
+                                        &self.model.tree.stats.files,
+                                        &self.model.tree.stats.directories,
+                                    ],
                                 ))
                                 .small()
-                                .color(MUTED),
+                                .color(palette.muted),
                             );
                         }
                         ui.separator();
-                        ui.label(RichText::new("FILTER").small().color(MUTED));
+                        ui.label(
+                            RichText::new(language.text("FILTER"))
+                                .small()
+                                .color(palette.muted),
+                        );
                         if ui
                             .add_sized(
                                 [ui.available_width(), 27.0],
@@ -785,26 +863,32 @@ impl App {
                         {
                             self.query_changed = Some(Instant::now());
                         }
-                        if !self.query.is_empty() && ui.small_button("Clear filter").clicked() {
+                        if !self.query.is_empty()
+                            && ui.small_button(language.text("Clear filter")).clicked()
+                        {
                             self.query.clear();
                             self.apply_filter();
                         }
                         if let Some(error) = &self.filter_error {
-                            ui.label(RichText::new(error).small().color(Color32::LIGHT_RED));
+                            ui.label(
+                                RichText::new(language.message(&error))
+                                    .small()
+                                    .color(palette.error),
+                            );
                         }
                         ui.horizontal(|ui| {
-                            ui.label("Depth");
+                            ui.label(language.text("Depth"));
                             ui.add(egui::Slider::new(&mut self.depth, 1..=6));
                         });
-                        ui.checkbox(&mut self.classic, "Classic colors");
+                        ui.checkbox(&mut self.classic, language.text("Classic colors"));
                         if self.loaded {
                             ui.separator();
                             self.selection(ui);
                             ui.add_space(5.0);
                             egui::CollapsingHeader::new(if self.partial {
-                                "Discovered entries"
+                                language.text("Discovered entries")
                             } else {
-                                "Largest entries"
+                                language.text("Largest entries")
                             })
                             .id_salt("entries_section")
                             .show(ui, |ui| self.largest(ui));
@@ -814,14 +898,16 @@ impl App {
                             if ui
                                 .add_enabled(
                                     self.loaded && !self.partial,
-                                    egui::Button::new("Export CSV"),
+                                    egui::Button::new(language.text("Export CSV")),
                                 )
-                                .on_disabled_hover_text("Available after the scan completes")
+                                .on_disabled_hover_text(
+                                    language.text("Available after the scan completes"),
+                                )
                                 .clicked()
                             {
                                 self.export();
                             }
-                            if ui.button("Help").clicked() {
+                            if ui.button(language.text("Help")).clicked() {
                                 self.help = true;
                             }
                         });
@@ -830,28 +916,34 @@ impl App {
     }
 
     fn selection(&mut self, ui: &mut egui::Ui) {
+        let language = self.preferences.language;
+        let palette = self.preferences.theme.palette();
         let node = &self.model.tree.nodes[self.selected];
-        ui.label(RichText::new("SELECTED").small().color(MUTED));
+        ui.label(
+            RichText::new(language.text("SELECTED"))
+                .small()
+                .color(palette.muted),
+        );
         ui.add(egui::Label::new(RichText::new(&node.name).strong()).truncate())
             .on_hover_text(node.path.to_string_lossy());
         ui.label(RichText::new(format_bytes(node.size)).size(20.0));
         if !self.applied.is_empty() {
             ui.label(
-                RichText::new(format!(
-                    "Matching {}",
-                    format_bytes(self.model.weights[self.selected])
+                RichText::new(language.format(
+                    "Matching {0}",
+                    &[&format_bytes(self.model.weights[self.selected])],
                 ))
                 .small()
-                .color(MUTED),
+                .color(palette.muted),
             );
         }
         let is_dir = node.is_dir();
         let path = node.path.to_string_lossy().into_owned();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Copy path").clicked() {
+            if ui.button(language.text("Copy path")).clicked() {
                 ui.ctx().copy_text(path.clone());
             }
-            if ui.button("Reveal").clicked()
+            if ui.button(language.text("Reveal")).clicked()
                 && let Err(error) =
                     crate::platform::reveal(&self.model.tree.nodes[self.selected].path, is_dir)
             {
@@ -860,7 +952,7 @@ impl App {
             if ui
                 .add_enabled(
                     is_dir && self.selected != self.zoom,
-                    egui::Button::new("Zoom"),
+                    egui::Button::new(language.text("Zoom")),
                 )
                 .clicked()
             {
@@ -870,6 +962,8 @@ impl App {
     }
 
     fn largest(&mut self, ui: &mut egui::Ui) {
+        let language = self.preferences.language;
+        let palette = self.preferences.theme.palette();
         let parent = if self.model.tree.nodes[self.selected].is_dir() {
             self.selected
         } else {
@@ -890,7 +984,7 @@ impl App {
                     ui.label(
                         RichText::new(format_bytes(self.model.weights[id]))
                             .small()
-                            .color(MUTED),
+                            .color(palette.muted),
                     );
                     if response.clicked() {
                         self.selected = id;
@@ -900,14 +994,14 @@ impl App {
                     }
                 }
                 if !complete {
-                    ui.small("Finding matching entries…");
+                    ui.small(language.text("Finding matching entries…"));
                 } else if ids.is_empty() {
-                    ui.small("No entries");
+                    ui.small(language.text("No entries"));
                 } else if has_more {
                     ui.small(if self.partial {
-                        "Showing the first 100 discovered entries"
+                        language.text("Showing the first 100 discovered entries")
                     } else {
-                        "Showing 100 largest entries"
+                        language.text("Showing 100 largest entries")
                     });
                 }
             });
@@ -959,57 +1053,69 @@ impl App {
     }
 
     fn status(&self, ctx: &egui::Context) {
+        let language = self.preferences.language;
+        let palette = self.preferences.theme.palette();
         egui::TopBottomPanel::bottom("status")
             .exact_height(25.0)
             .frame(
                 egui::Frame::new()
-                    .fill(PANEL)
+                    .fill(palette.panel)
                     .inner_margin(egui::Margin::symmetric(10, 4)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if self.loading {
                         ui.label(
-                            RichText::new(format!(
-                                "Scanning · {:.1}s · {} files on map",
-                                self.started.elapsed().as_secs_f32(),
-                                self.model.tree.stats.files
+                            RichText::new(language.format(
+                                "Scanning · {0}s · {1} files on map",
+                                &[
+                                    &format!("{:.1}", self.started.elapsed().as_secs_f32()),
+                                    &self.model.tree.stats.files,
+                                ],
                             ))
                             .small()
-                            .color(MUTED),
+                            .color(palette.muted),
                         );
                     } else if self.loaded && self.partial {
                         ui.label(
-                            RichText::new(format!(
-                                "Partial map · {} discovered files",
-                                self.model.tree.stats.files
+                            RichText::new(language.format(
+                                "Partial map · {0} discovered files",
+                                &[&self.model.tree.stats.files],
                             ))
                             .small()
-                            .color(MUTED),
+                            .color(palette.muted),
                         );
                     } else if self.loaded {
                         ui.label(
-                            RichText::new(format!(
-                                "{} updates · {} skipped · {} links · initial scan {:.2}s",
-                                self.updates,
-                                self.model.tree.stats.skipped,
-                                self.model.tree.stats.symlinks,
-                                self.model.tree.stats.elapsed.as_secs_f64()
+                            RichText::new(language.format(
+                                "{0} updates · {1} skipped · {2} links · initial scan {3}s",
+                                &[
+                                    &self.updates,
+                                    &self.model.tree.stats.skipped,
+                                    &self.model.tree.stats.symlinks,
+                                    &format!("{:.2}", self.model.tree.stats.elapsed.as_secs_f64()),
+                                ],
                             ))
                             .small()
-                            .color(MUTED),
+                            .color(palette.muted),
                         );
                     } else {
                         ui.label(
-                            RichText::new("Select a drive or folder to start watching.")
-                                .small()
-                                .color(MUTED),
+                            RichText::new(
+                                language.text("Select a drive or folder to start watching."),
+                            )
+                            .small()
+                            .color(palette.muted),
                         );
                     }
                     if !self.notice.is_empty() {
                         ui.add(
-                            egui::Label::new(RichText::new(&self.notice).small().color(ACCENT))
-                                .truncate(),
+                            egui::Label::new(
+                                RichText::new(language.message(&self.notice))
+                                    .small()
+                                    .color(palette.accent),
+                            )
+                            .truncate(),
                         );
                     }
                     if let Some(pending) = &self.filter_job {
@@ -1017,21 +1123,33 @@ impl App {
                             / pending.job.total().max(1) as f64
                             * 100.0;
                         ui.label(
-                            RichText::new(format!("Filtering · {percent:.0}%"))
-                                .small()
-                                .color(ACCENT),
+                            RichText::new(
+                                language.format("Filtering · {0}%", &[&format!("{percent:.0}")]),
+                            )
+                            .small()
+                            .color(palette.accent),
                         );
                     } else if self.prepared_model.is_some() {
-                        ui.label(RichText::new("Filtering…").small().color(ACCENT));
+                        ui.label(
+                            RichText::new(language.text("Filtering…"))
+                                .small()
+                                .color(palette.accent),
+                        );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("Logical bytes").small().color(MUTED));
+                        ui.label(
+                            RichText::new(language.text("Logical bytes"))
+                                .small()
+                                .color(palette.muted),
+                        );
                     });
                 });
             });
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let language = self.preferences.language;
+        let palette = self.preferences.theme.palette();
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!self.back.is_empty(), egui::Button::new("<"))
@@ -1048,7 +1166,7 @@ impl App {
             if ui
                 .add_enabled(
                     self.model.tree.nodes[self.zoom].parent.is_some(),
-                    egui::Button::new("Up"),
+                    egui::Button::new(language.text("Up")),
                 )
                 .clicked()
                 && let Some(parent) = self.model.tree.nodes[self.zoom].parent
@@ -1080,7 +1198,7 @@ impl App {
                                     {
                                         self.navigate(id);
                                     }
-                                    ui.label(RichText::new("/").color(MUTED));
+                                    ui.label(RichText::new("/").color(palette.muted));
                                 }
                             });
                         });
@@ -1089,44 +1207,48 @@ impl App {
             ui.label(
                 RichText::new(format_bytes(self.model.weights[self.zoom]))
                     .strong()
-                    .color(ACCENT),
+                    .color(palette.accent),
             );
         });
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui) {
+        let language = self.preferences.language;
+        let palette = self.preferences.theme.palette();
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.32).max(15.0));
             if self.loading {
-                ui.heading("Scanning your files");
+                ui.heading(language.text("Scanning your files"));
                 if let Some(progress) = &self.progress {
-                    ui.label(format!(
-                        "{} files · {} found",
-                        progress.files,
-                        format_bytes(progress.bytes)
+                    ui.label(language.format(
+                        "{0} files · {1} found",
+                        &[&progress.files, &format_bytes(progress.bytes)],
                     ));
                 }
             } else {
-                ui.heading("Choose a disk or folder");
+                ui.heading(language.text("Choose a disk or folder"));
                 ui.label(
-                    RichText::new("The map will follow file changes automatically.").color(MUTED),
+                    RichText::new(language.text("The map will follow file changes automatically."))
+                        .color(palette.muted),
                 );
-                if ui.button("Open folder…").clicked() {
+                if ui.button(language.text("Open folder…")).clicked() {
                     self.choose_folder();
                 }
                 ui.label(
-                    RichText::new("Or select a drive in the sidebar.")
+                    RichText::new(language.text("Or select a drive in the sidebar."))
                         .small()
-                        .color(MUTED),
+                        .color(palette.muted),
                 );
             }
         });
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
+        let language = self.preferences.language;
+        let palette = self.preferences.theme.palette();
         let (area, response) = ui.allocate_exact_size(ui.available_size(), Sense::click());
         let painter = ui.painter_at(area);
-        painter.rect_filled(area, 5.0, BG);
+        painter.rect_filled(area, 5.0, palette.background);
         if self.map_cache.as_ref().is_none_or(|cache| {
             cache.root != self.zoom
                 || cache.depth != self.depth
@@ -1187,7 +1309,9 @@ impl App {
             };
             if text_rect.width() > 40.0 && text_rect.height() > 12.0 {
                 let label = if tile.collapsed > 0 {
-                    std::borrow::Cow::Owned(format!("{} smaller entries", tile.collapsed))
+                    std::borrow::Cow::Owned(
+                        language.format("{0} smaller entries", &[&tile.collapsed]),
+                    )
                 } else {
                     std::borrow::Cow::Borrowed(node.name.as_str())
                 };
@@ -1239,14 +1363,14 @@ impl App {
                 area.center(),
                 Align2::CENTER_CENTER,
                 if self.loading {
-                    "Scanning…\nThe map fills as file sizes are discovered."
+                    language.text("Scanning…\nThe map fills as file sizes are discovered.")
                 } else if self.applied.is_empty() {
-                    "No file bytes here yet.\nNew files will appear automatically."
+                    language.text("No file bytes here yet.\nNew files will appear automatically.")
                 } else {
-                    "No files match this filter."
+                    language.text("No files match this filter.")
                 },
                 FontId::proportional(18.0),
-                MUTED,
+                palette.muted,
             );
         }
         if let Some(index) = hovered {
@@ -1258,15 +1382,17 @@ impl App {
                 // Tiles share one tooltip; let it grow after hovering a shorter entry.
                 ui.set_max_width(ui.spacing().tooltip_width);
                 if tile.collapsed > 0 {
-                    ui.strong(format!("{} smaller entries", tile.collapsed));
-                    ui.small("Zoom into this folder or filter to inspect smaller files.");
+                    ui.strong(language.format("{0} smaller entries", &[&tile.collapsed]));
+                    ui.small(
+                        language.text("Zoom into this folder or filter to inspect smaller files."),
+                    );
                 } else {
                     ui.strong(&node.name);
                 }
                 ui.label(format_bytes(tile.bytes));
                 ui.label(node.path.to_string_lossy());
                 if node.is_dir() {
-                    ui.small("Double-click to zoom in");
+                    ui.small(language.text("Double-click to zoom in"));
                 }
             });
             if response.clicked() || response.secondary_clicked() {
@@ -1277,7 +1403,7 @@ impl App {
             }
         }
         response.context_menu(|ui| {
-            if ui.button("Copy selected path").clicked() {
+            if ui.button(language.text("Copy selected path")).clicked() {
                 ui.ctx().copy_text(
                     self.model.tree.nodes[self.selected]
                         .path
@@ -1289,14 +1415,14 @@ impl App {
             if ui
                 .add_enabled(
                     self.model.tree.nodes[self.selected].is_dir(),
-                    egui::Button::new("Zoom into selection"),
+                    egui::Button::new(language.text("Zoom into selection")),
                 )
                 .clicked()
             {
                 self.navigate(self.selected);
                 ui.close();
             }
-            if ui.button("Back to root").clicked() {
+            if ui.button(language.text("Back to root")).clicked() {
                 self.navigate(self.model.tree.root);
                 ui.close();
             }
@@ -1306,6 +1432,7 @@ impl App {
 
 impl App {
     pub fn save(&self, storage: &mut dyn eframe::Storage) {
+        self.preferences.save(storage);
         self.updates_ui.save(storage);
     }
 
@@ -1326,6 +1453,8 @@ impl App {
     }
 
     pub fn draw(&mut self, ctx: &egui::Context) {
+        let language = self.preferences.language;
+        let palette = self.preferences.theme.palette();
         self.tick(ctx);
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.choose_folder();
@@ -1345,12 +1474,16 @@ impl App {
         self.sidebar(ctx);
         self.status(ctx);
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(6))
+            .frame(egui::Frame::new().fill(palette.background).inner_margin(6))
             .show(ctx, |ui| {
                 if let Some(error) = self.error.clone() {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(error).small().color(Color32::LIGHT_RED));
-                        if ui.small_button("Dismiss").clicked() {
+                        ui.label(
+                            RichText::new(language.message(&error))
+                                .small()
+                                .color(palette.error),
+                        );
+                        if ui.small_button(language.text("Dismiss")).clicked() {
                             self.error = None;
                         }
                     });
@@ -1366,24 +1499,29 @@ impl App {
             .open(&mut self.help)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label("Choose any drive or folder. Changes update the map automatically.");
-                ui.label("The first scan fills the map progressively; sizes show discovered data.");
-                ui.label("Click: inspect. Double-click: zoom. Backspace: parent.");
-                ui.label(format!(
-                    "{}: choose root. F5: optional full rescan.",
-                    crate::platform::OPEN_SHORTCUT_LABEL
+                ui.label(
+                    language
+                        .text("Choose any drive or folder. Changes update the map automatically."),
+                );
+                ui.label(language.text(
+                    "The first scan fills the map progressively; sizes show discovered data.",
+                ));
+                ui.label(language.text("Click: inspect. Double-click: zoom. Backspace: parent."));
+                ui.label(language.format(
+                    "{0}: choose root. F5: optional full rescan.",
+                    &[&crate::platform::OPEN_SHORTCUT_LABEL],
                 ));
                 ui.separator();
                 ui.monospace("*.zip; >100mb; |backup*");
-                ui.label("Combine filename and size filters with semicolons.");
-                ui.label("MB uses decimal bytes; MiB uses binary bytes.");
+                ui.label(language.text("Combine filename and size filters with semicolons."));
+                ui.label(language.text("MB uses decimal bytes; MiB uses binary bytes."));
                 ui.separator();
-                ui.label("Logical file sizes; hard links count per path.");
-                ui.label("Links and reparse points are not traversed.");
-                ui.label("Watcher errors trigger automatic recovery.");
-                ui.label("MIT licensed · No telemetry · No deletion actions");
+                ui.label(language.text("Logical file sizes; hard links count per path."));
+                ui.label(language.text("Links and reparse points are not traversed."));
+                ui.label(language.text("Watcher errors trigger automatic recovery."));
+                ui.label(language.text("MIT licensed · No telemetry · No deletion actions"));
             });
-        if self.updates_ui.window(ctx) {
+        if self.updates_ui.window(ctx, language) {
             let root = self
                 .loaded
                 .then(|| self.model.tree.nodes[self.model.tree.root].path.clone());

@@ -1,6 +1,7 @@
 use eframe::egui::{self, RichText};
 use space_sniffer::{
     format_bytes,
+    i18n::Language,
     updater::{self, Asset, Download, Release},
 };
 use std::{
@@ -160,11 +161,11 @@ impl Updates {
         }
     }
 
-    pub fn button(&mut self, ui: &mut egui::Ui) {
+    pub fn button(&mut self, ui: &mut egui::Ui, language: Language) {
         let label = if self.release.is_some() {
-            "Update available"
+            language.text("Update available")
         } else {
-            "Updates"
+            language.text("Updates")
         };
         ui.horizontal(|ui| {
             ui.small(format!("v{}", updater::CURRENT_VERSION));
@@ -215,69 +216,69 @@ impl Updates {
     }
 
     /// Returns true when the user requests another restart attempt.
-    pub fn window(&mut self, ctx: &egui::Context) -> bool {
+    pub fn window(&mut self, ctx: &egui::Context, language: Language) -> bool {
         let mut open = self.open;
         let mut restart = false;
-        egui::Window::new("App updates")
+        egui::Window::new(language.text("App updates"))
             .open(&mut open)
             .default_width(420.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.label(format!("Space Sniffer {}", updater::CURRENT_VERSION));
-                ui.small("Check the latest stable release on GitHub. Download and installation require your action.");
-                ui.checkbox(&mut self.check_on_startup, "Check for updates on startup");
+                ui.small(language.text("Check the latest stable release on GitHub. Download and installation require your action."));
+                ui.checkbox(&mut self.check_on_startup, language.text("Check for updates on startup"));
                 ui.separator();
                 match self.status {
                     Status::Idle => {
-                        ui.label("Check GitHub for a newer version.");
+                        ui.label(language.text("Check GitHub for a newer version."));
                     }
                     Status::Checking => {
-                        ui.label("Checking GitHub…");
+                        ui.label(language.text("Checking GitHub…"));
                     }
                     Status::Current => {
-                        ui.label("You are using the latest version.");
+                        ui.label(language.text("You are using the latest version."));
                     }
                     Status::Available => {
-                        ui.label("A newer version is available.");
+                        ui.label(language.text("A newer version is available."));
                     }
                     Status::Downloading => {
                         let received = self.transferred.load(Ordering::Relaxed);
                         let total = self.release.as_ref().and_then(|r| r.asset.as_ref()).map_or(1, |a| a.size);
                         ui.add(egui::ProgressBar::new(received as f32 / total as f32)
                             .text(format!("{} / {}", format_bytes(received), format_bytes(total))));
-                        if ui.button("Cancel download").clicked() {
+                        if ui.button(language.text("Cancel download")).clicked() {
                             self.cancelled.store(true, Ordering::Relaxed);
                         }
                     }
                     Status::Ready => {
-                        ui.label("Download verified. Ready to install.");
+                        ui.label(language.text("Download verified. Ready to install."));
                     }
                     Status::Installing => {
-                        ui.label("Installing update…");
+                        ui.label(language.text("Installing update…"));
                     }
                     Status::Installed => {
-                        ui.label("Restarting to install the verified update…");
+                        ui.label(language.text("Restarting to install the verified update…"));
                     }
                 }
                 if let Some(release) = &self.release {
-                    ui.label(RichText::new(format!("Version {}", release.version)).strong());
-                    ui.hyperlink_to("View release on GitHub", &release.page_url);
+                    ui.label(RichText::new(language.format("Version {0}", &[&release.version])).strong());
+                    ui.hyperlink_to(language.text("View release on GitHub"), &release.page_url);
                     if !updater::CAN_INSTALL {
-                        ui.label("In-app installation is available for Windows x86-64. Build this platform from the release source.");
+                        ui.label(language.text("In-app installation is available for Windows x86-64. Build this platform from the release source."));
                     } else if !release.asset.as_ref().is_some_and(|a| a.is_verifiable()) {
-                        ui.label("This release has no verified Windows executable. Use the release page to update manually.");
-                    } else if self.status == Status::Available && ui.button("Download and install").clicked() {
+                        ui.label(language.text("This release has no verified Windows executable. Use the release page to update manually."));
+                    } else if self.status == Status::Available && ui.button(language.text("Download and install")).clicked() {
                         let asset = release.asset.clone().unwrap();
                         self.begin_download(ctx, asset);
                     }
                     if self.status == Status::Ready {
-                        ui.small("The app will replace its executable and restart. The current root will be scanned again.");
-                        if ui.button("Install and restart").clicked() {
+                        ui.small(language.text("The app will replace its executable and restart. The current root will be scanned again."));
+                        if ui.button(language.text("Install and restart")).clicked() {
                             restart = true;
                         }
                     }
                     if let Some(release) = &self.release {
-                        egui::CollapsingHeader::new("Release notes").show(ui, |ui| {
+                        egui::CollapsingHeader::new(language.text("Release notes")).show(ui, |ui| {
                             egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                                 ui.add(egui::Label::new(&release.notes).wrap());
                             });
@@ -285,13 +286,13 @@ impl Updates {
                     }
                 }
                 if let Some(error) = &self.error {
-                    ui.add(egui::Label::new(RichText::new(error).color(egui::Color32::LIGHT_RED)).wrap());
+                    ui.add(egui::Label::new(RichText::new(format!("{}: {}", language.text("Error"), language.message(error))).color(ui.visuals().error_fg_color)).wrap());
                 }
                 ui.separator();
-                if ui.add_enabled(!self.busy() && self.status != Status::Installed, egui::Button::new("Check for updates")).clicked() {
+                if ui.add_enabled(!self.busy() && self.status != Status::Installed, egui::Button::new(language.text("Check for updates"))).clicked() {
                     self.check(ctx);
                 }
-                ui.hyperlink_to("GitHub Releases", updater::RELEASES_URL);
+                ui.hyperlink_to(language.text("GitHub Releases"), updater::RELEASES_URL);
             });
         self.open = open;
         self.guard_close(ctx);
@@ -332,7 +333,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    updates.window(ctx);
+                    updates.window(ctx, Language::English);
                 },
             );
             delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
@@ -403,7 +404,7 @@ mod tests {
                 .events
                 .push(egui::ViewportEvent::Close);
             let output = ctx.run(input, |ctx| {
-                updates.window(ctx);
+                updates.window(ctx, Language::English);
             });
             let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
             assert_eq!(
