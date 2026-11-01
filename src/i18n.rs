@@ -85,6 +85,22 @@ impl Language {
             );
         }
         for (prefix, template) in [
+            ("Unable to resolve ", "Unable to resolve {0}"),
+            ("Unable to inspect ", "Unable to inspect {0}"),
+            ("Unable to read ", "Unable to read {0}"),
+            (
+                "Unable to start the scan: ",
+                "Unable to start the scan: {0}",
+            ),
+            (
+                "Unable to start live scanning: ",
+                "Unable to start live scanning: {0}",
+            ),
+            (
+                "Unable to start directory scanning: ",
+                "Unable to start directory scanning: {0}",
+            ),
+            ("Could not reveal entry: ", "Could not reveal entry: {0}"),
             ("Incomplete scan preview: ", "Incomplete scan preview: {0}"),
             ("Could not save report: ", "Could not save report: {0}"),
             (
@@ -120,6 +136,28 @@ impl Language {
         }
         if let Some(detail) = message.strip_suffix(" · waiting for recovery") {
             return Cow::Owned(self.format("{0} · waiting for recovery", &[&detail]));
+        }
+        for (suffix, template) in [
+            (
+                " is a link or reparse point. Select its target directly.",
+                "{0} is a link or reparse point. Select its target directly.",
+            ),
+            (
+                " is not a regular file or directory.",
+                "{0} is not a regular file or directory.",
+            ),
+            (
+                " is no longer a directory.",
+                "{0} is no longer a directory.",
+            ),
+            (
+                " became a link or reparse point during the scan.",
+                "{0} became a link or reparse point during the scan.",
+            ),
+        ] {
+            if let Some(path) = message.strip_suffix(suffix) {
+                return Cow::Owned(self.format(template, &[&path]));
+            }
         }
         Cow::Borrowed(message)
     }
@@ -167,6 +205,10 @@ impl Theme {
 
     pub fn apply(self, ctx: &egui::Context) {
         let palette = self.palette();
+        ctx.set_theme(match self {
+            Self::Light => egui::Theme::Light,
+            Self::Dark => egui::Theme::Dark,
+        });
         let mut visuals = match self {
             Self::Light => egui::Visuals::light(),
             Self::Dark => egui::Visuals::dark(),
@@ -179,6 +221,7 @@ impl Theme {
             Self::Dark => Color32::from_rgb(41, 90, 90),
         };
         visuals.hyperlink_color = palette.accent;
+        visuals.error_fg_color = palette.error;
         ctx.set_visuals(visuals);
     }
 }
@@ -282,6 +325,19 @@ messages! {
     ("Back to root", "К корню", "Retour à la racine", "Zurück zum Stamm", "Volver a la raíz", "Torna alla radice"),
     ("Dismiss", "Скрыть", "Fermer", "Schließen", "Cerrar", "Chiudi"),
     ("Error", "Ошибка", "Erreur", "Fehler", "Error", "Errore"),
+    ("Unable to resolve {0}", "Не удалось определить путь {0}", "Impossible de résoudre {0}", "Pfad konnte nicht aufgelöst werden: {0}", "No se pudo resolver {0}", "Impossibile risolvere {0}"),
+    ("Unable to inspect {0}", "Не удалось прочитать сведения о {0}", "Impossible d'inspecter {0}", "Eintrag konnte nicht geprüft werden: {0}", "No se pudo inspeccionar {0}", "Impossibile esaminare {0}"),
+    ("Unable to read {0}", "Не удалось прочитать {0}", "Impossible de lire {0}", "Eintrag konnte nicht gelesen werden: {0}", "No se pudo leer {0}", "Impossibile leggere {0}"),
+    ("Unable to start the scan: {0}", "Не удалось начать сканирование: {0}", "Impossible de démarrer l'analyse : {0}", "Einlesen konnte nicht gestartet werden: {0}", "No se pudo iniciar el análisis: {0}", "Impossibile avviare la scansione: {0}"),
+    ("Unable to start live scanning: {0}", "Не удалось начать сканирование с наблюдением: {0}", "Impossible de démarrer l'analyse en direct : {0}", "Live-Einlesen konnte nicht gestartet werden: {0}", "No se pudo iniciar el análisis en vivo: {0}", "Impossibile avviare la scansione in tempo reale: {0}"),
+    ("Unable to start directory scanning: {0}", "Не удалось запустить сканирование папок: {0}", "Impossible de démarrer l'analyse des dossiers : {0}", "Ordnereinlesen konnte nicht gestartet werden: {0}", "No se pudo iniciar el análisis de carpetas: {0}", "Impossibile avviare la scansione delle cartelle: {0}"),
+    ("Could not reveal entry: {0}", "Не удалось показать элемент: {0}", "Impossible d'afficher l'élément : {0}", "Eintrag konnte nicht angezeigt werden: {0}", "No se pudo mostrar el elemento: {0}", "Impossibile mostrare l'elemento: {0}"),
+    ("{0} is a link or reparse point. Select its target directly.", "{0} — ссылка или точка повторного анализа. Выберите её целевой путь.", "{0} est un lien ou point de réanalyse. Sélectionnez directement sa cible.", "{0} ist ein Link oder Analysepunkt. Ziel direkt auswählen.", "{0} es un enlace o punto de reanálisis. Selecciona su destino directamente.", "{0} è un collegamento o punto di analisi. Seleziona direttamente la destinazione."),
+    ("{0} is not a regular file or directory.", "{0} не является обычным файлом или папкой.", "{0} n'est pas un fichier ou dossier ordinaire.", "{0} ist keine reguläre Datei oder kein Ordner.", "{0} no es un archivo o directorio normal.", "{0} non è un file o cartella normale."),
+    ("{0} is no longer a directory.", "{0} больше не является папкой.", "{0} n'est plus un dossier.", "{0} ist kein Ordner mehr.", "{0} ya no es un directorio.", "{0} non è più una cartella."),
+    ("{0} became a link or reparse point during the scan.", "{0} стал ссылкой или точкой повторного анализа во время сканирования.", "{0} est devenu un lien ou point de réanalyse pendant l'analyse.", "{0} wurde beim Einlesen zu einem Link oder Analysepunkt.", "{0} se convirtió en enlace o punto de reanálisis durante el análisis.", "{0} è diventato un collegamento o punto di analisi durante la scansione."),
+    ("Directory scan workers stopped unexpectedly", "Обработчики сканирования папок неожиданно остановились", "Les tâches d'analyse des dossiers se sont arrêtées inopinément", "Die Ordnereinlesung wurde unerwartet beendet", "El análisis de carpetas se detuvo inesperadamente", "La scansione delle cartelle si è interrotta in modo imprevisto"),
+    ("Scan cancelled", "Сканирование отменено", "Analyse annulée", "Einlesen abgebrochen", "Análisis cancelado", "Scansione annullata"),
     ("Export disk usage report", "Экспорт отчёта о диске", "Exporter le rapport d'utilisation du disque", "Bericht zur Datenträgerbelegung exportieren", "Exportar informe de uso del disco", "Esporta rapporto sull'uso del disco"),
     ("CSV report", "Отчёт CSV", "Rapport CSV", "CSV-Bericht", "Informe CSV", "Rapporto CSV"),
     ("Saved {0}", "Сохранено: {0}", "Enregistré : {0}", "Gespeichert: {0}", "Guardado: {0}", "Salvato: {0}"),
@@ -428,6 +484,14 @@ mod tests {
         for theme in [Theme::Light, Theme::Dark] {
             theme.apply(&context);
             assert_eq!(context.style().visuals.dark_mode, theme == Theme::Dark);
+            assert_eq!(
+                context.theme(),
+                if theme == Theme::Dark {
+                    egui::Theme::Dark
+                } else {
+                    egui::Theme::Light
+                }
+            );
             assert_eq!(context.style().visuals.panel_fill, theme.palette().panel);
             assert_ne!(theme.palette().background, theme.palette().muted);
         }

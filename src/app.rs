@@ -62,7 +62,7 @@ impl App {
     ) -> Self {
         let preferences = Preferences::load(storage);
         preferences.theme.apply(ctx);
-        ctx.style_mut(|style| {
+        ctx.all_styles_mut(|style| {
             #[cfg(feature = "screenshots")]
             if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
                 style.animation_time = 0.0;
@@ -871,7 +871,7 @@ impl App {
                         }
                         if let Some(error) = &self.filter_error {
                             ui.label(
-                                RichText::new(language.message(&error))
+                                RichText::new(language.message(error))
                                     .small()
                                     .color(palette.error),
                             );
@@ -1717,6 +1717,39 @@ fn color(node: &Node, classic: bool, level: usize) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_language_and_theme_settles_without_animating_the_idle_window() {
+        for language in Language::ALL {
+            for theme in [Theme::Light, Theme::Dark] {
+                let ctx = egui::Context::default();
+                let mut app = App::empty(ctx.clone());
+                app.preferences = Preferences { language, theme };
+                theme.apply(&ctx);
+                let mut delay = Duration::ZERO;
+                for frame in 0..12 {
+                    let output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                Pos2::ZERO,
+                                Vec2::new(800.0, 520.0),
+                            )),
+                            time: Some(frame as f64),
+                            ..Default::default()
+                        },
+                        |ctx| app.draw(ctx),
+                    );
+                    delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+                    assert!(!output.shapes.is_empty());
+                }
+                assert_eq!(delay, Duration::MAX, "{language:?} {theme:?} stayed active");
+                assert!(
+                    app.live.is_none(),
+                    "appearance choices must not start scanning"
+                );
+            }
+        }
+    }
 
     #[test]
     fn waiting_for_scan_progress_does_not_continuously_request_frames() {
