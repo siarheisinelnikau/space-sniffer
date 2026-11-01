@@ -43,9 +43,20 @@ function fixture(options = {}) {
   if (draft && options.changeDraft) options.changeDraft(draft);
   const mutations = [];
   let failUpload = Boolean(options.failUpload);
+  let tagDepth = 0;
   const missing = () => { const error = new Error('Not found'); error.status = 404; throw error; };
   const github = {rest: {
-    git: {getRef: async () => options.tagTarget ? {data: {object: {type: 'commit', sha: options.tagTarget}}} : missing()},
+    git: {
+      getRef: async () => options.annotatedTarget || options.tagCycle || options.tagDepth ?
+        {data: {object: {type: 'tag', sha: 'd'.repeat(40)}}} :
+        options.tagTarget ? {data: {object: {type: 'commit', sha: options.tagTarget}}} : missing(),
+      getTag: async ({tag_sha}) => {
+        tagDepth++;
+        return {data: {object: options.tagCycle ? {type: 'tag', sha: tag_sha} :
+          options.tagDepth ? {type: 'tag', sha: tagDepth.toString(16).padStart(40, '0')} :
+          {type: 'commit', sha: options.annotatedTarget}}};
+      },
+    },
     repos: {
       getReleaseByTag: async () => { throw new Error('Draft tag lookup must never be used'); },
       listReleases: async () => ({data: draft ? [copy(draft)] : []}),
@@ -104,6 +115,13 @@ test('a completed current owned draft is published without replacing assets', as
   assert.deepEqual(state.mutations, ['publish']);
 });
 
+test('peels an existing annotated tag without moving its matching commit', async () => {
+  const state = fixture({annotatedTarget: 'b'.repeat(40)});
+  await publish(state);
+  assert.equal(state.getDraft().draft, false);
+  assert.equal(state.getDraft().target_commitish, state.context.sha);
+});
+
 test('a failed upload remains a draft and the next run safely resumes by ID', async () => {
   const state = fixture({failUpload: true});
   await assert.rejects(() => publish(state), /Synthetic upload interruption/);
@@ -128,6 +146,9 @@ for (const [name, options, expression] of [
   ['changed draft asset', {changeDraft: draft => { draft.assets[0].digest = 'sha256:' + '0'.repeat(64); }}, /draft asset differs/],
   ['application source changes', {sourceChange: true}, /Only workflow and publisher changes/],
   ['existing tag for another commit', {tagTarget: 'c'.repeat(40)}, /tags are never moved/],
+  ['annotated tag for another commit', {annotatedTarget: 'c'.repeat(40)}, /tags are never moved/],
+  ['annotated tag cycle', {tagCycle: true}, /cycle or depth limit/],
+  ['annotated tag depth beyond eight', {tagDepth: true}, /cycle or depth limit/],
 ]) {
   test(`refuses ${name} before any mutation`, async () => {
     const state = fixture(options);
