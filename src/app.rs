@@ -698,6 +698,7 @@ impl App {
                             );
                             if self.preferences.theme != old_theme {
                                 self.preferences.theme.apply(ctx);
+                                ctx.request_repaint();
                             }
                         });
                         if self.preferences.language != old_language {
