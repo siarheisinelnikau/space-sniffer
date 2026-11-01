@@ -32,6 +32,9 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - uses: actions/checkout@v4
+      - name: Provision shared updater source
+        shell: pwsh
+        run: ./scripts/provision-shared-updater.ps1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
