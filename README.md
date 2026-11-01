@@ -8,7 +8,7 @@ A native, live disk usage explorer written in Rust with [egui](https://github.co
 
 ![Space Sniffer on Windows: compact sidebar and live nested disk usage map](docs/screenshot.png)
 
-The app watching a real project folder on Windows.
+Space Sniffer 0.5.0 on Windows, rendered by the application with an isolated sample folder. Language and theme controls are available at the top of the sidebar.
 
 This is an independent implementation inspired by [SpaceSniffer by Uderzo Software](https://www.uderzo.it/main_products/space_sniffer/). It is not affiliated with Uderzo Software and does not use the original application's source code or assets.
 
@@ -26,6 +26,8 @@ The Windows executable now embeds the treemap application mark at 16, 20, 24, 32
 - Drive shortcuts, a root path field, and an empty start screen until you choose a location.
 - A command-line scan summary without opening a window.
 - Background GitHub update checks, release notes, and verified in-app updates for Windows x86-64.
+- Live interface language switching between English, Russian, French, German, Spanish, and Italian.
+- Persistent light and dark themes, with a direct switch in the sidebar.
 
 Large-tree work is measured separately from disk I/O: million-entry filtering runs in short UI slices, and the map aggregates small files instead of drawing millions of rectangles. A dense 8,000-tile CPU frame benchmark improved from roughly **18 ms to 5 ms**. See [benchmarks, methodology, and limits](docs/performance.md); these are local CPU measurements, not whole-drive or frame-rate guarantees.
 
@@ -83,7 +85,17 @@ Install Rust and Xcode Command Line Tools (`xcode-select --install`), then run f
 cargo run --locked --release -- "$HOME"
 ```
 
-Download and run the standalone Windows executable from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). New releases use **SpaceSniffer-vVERSION.exe**, such as `SpaceSniffer-v0.4.2.exe`; earlier releases used `space-sniffer.exe`. The file needs no installation or extraction. Releases contain one Windows x86-64 executable, so its name has no architecture suffix. Linux and macOS can be built from source. Publishing retains existing releases and assets. See the [release naming and publishing rules](CONTRIBUTING.md#releases).
+Download and run the standalone Windows executable from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). New releases use **SpaceSniffer-vVERSION.exe**, such as `SpaceSniffer-v0.5.0.exe`; earlier releases used `space-sniffer.exe`. The file needs no installation or extraction. Releases contain one Windows x86-64 executable, so its name has no architecture suffix. Linux and macOS can be built from source. Publishing retains existing releases and assets. See the [release naming and publishing rules](CONTRIBUTING.md#releases).
+
+## Language and appearance
+
+Use **Language** at the top of the sidebar to choose **English**, **Русский**, **Français**, **Deutsch**, **Español**, or **Italiano**. The interface changes immediately, including the scan controls, progress and watcher messages, selection actions, filters, help, and update settings. English is the default language and the fallback for unknown messages. Filenames, paths, filter syntax, release notes supplied by GitHub, and technical operating-system details retain their original text.
+
+Choose **Light** or **Dark** beside **Theme** to change the interface immediately. Both preferences are saved with the existing per-user settings and survive restarting or updating the portable executable. Existing installations keep the dark appearance until another theme is selected. Language and theme changes do not start a scan, contact a server, or introduce a recurring redraw timer.
+
+![Space Sniffer 0.5.0 using the Russian interface and light theme on an isolated Windows sample folder](docs/light-russian.png)
+
+The same application components and CPU/GDI renderer produce both themes. This is an application-generated client-area capture, not a desktop automation screenshot.
 
 ## App updates
 
@@ -97,7 +109,7 @@ Release discovery, download verification and replacement are provided by the sha
 
 ![Space Sniffer Updates settings showing the installed version, startup-check preference, and manual update check](docs/updates.png)
 
-The Updates window on Windows, including the persistent startup-check setting.
+The Updates window in Space Sniffer 0.5.0 on Windows, including the persistent startup-check setting. Language and theme choices are in the sidebar and also apply to this window.
 
 ## Explore a scan
 

@@ -1,0 +1,222 @@
+{
+  "SampledAtUtc": "2026-11-01T19:30:51.0922799Z",
+  "LogicalProcessors": 20,
+  "RequestedSamples": 20,
+  "IntervalMilliseconds": 1000,
+  "Limitations": "CPU and memory only. Include helper PIDs explicitly. GPU/backend/frame counts require separate evidence.",
+  "Processes": [
+    {
+      "ProcessId": 41160,
+      "Name": "SpaceSniffer-v0.5.0-diagnostic",
+      "ExecutablePath": "E:\\work\\github\\space-sniffer\\.local\\localization-audit\\SpaceSniffer-v0.5.0-diagnostic.exe",
+      "StartTimeUtc": "2026-11-01T19:30:28.6574123Z",
+      "Status": "Sampled",
+      "Error": null,
+      "DurationSeconds": 20.3341,
+      "AverageCpuOneCorePercent": 0.0,
+      "AverageCpuMachinePercent": 0.0,
+      "Samples": [
+        {
+          "Sample": 1,
+          "ElapsedSeconds": 1.0236,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 201
+        },
+        {
+          "Sample": 2,
+          "ElapsedSeconds": 1.0437,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 201
+        },
+        {
+          "Sample": 3,
+          "ElapsedSeconds": 1.0129,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 201
+        },
+        {
+          "Sample": 4,
+          "ElapsedSeconds": 1.0108,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 201
+        },
+        {
+          "Sample": 5,
+          "ElapsedSeconds": 1.0104,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 201
+        },
+        {
+          "Sample": 6,
+          "ElapsedSeconds": 1.0088,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 7,
+          "ElapsedSeconds": 1.0197,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 8,
+          "ElapsedSeconds": 1.0237,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 9,
+          "ElapsedSeconds": 1.0071,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 10,
+          "ElapsedSeconds": 1.01,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 11,
+          "ElapsedSeconds": 1.012,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 12,
+          "ElapsedSeconds": 1.0256,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 13,
+          "ElapsedSeconds": 1.0217,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36384768,
+          "PrivateBytes": 15892480,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 14,
+          "ElapsedSeconds": 1.0116,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36519936,
+          "PrivateBytes": 16072704,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 15,
+          "ElapsedSeconds": 1.0175,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36519936,
+          "PrivateBytes": 16072704,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 16,
+          "ElapsedSeconds": 1.0189,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36519936,
+          "PrivateBytes": 16072704,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 17,
+          "ElapsedSeconds": 1.0181,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36519936,
+          "PrivateBytes": 16072704,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 18,
+          "ElapsedSeconds": 1.0151,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36519936,
+          "PrivateBytes": 16072704,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 19,
+          "ElapsedSeconds": 1.0108,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36519936,
+          "PrivateBytes": 16072704,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        },
+        {
+          "Sample": 20,
+          "ElapsedSeconds": 1.0121,
+          "CpuOneCorePercent": 0.0,
+          "CpuMachinePercent": 0.0,
+          "WorkingSetBytes": 36519936,
+          "PrivateBytes": 16072704,
+          "ThreadCount": 10,
+          "HandleCount": 203
+        }
+      ]
+    }
+  ]
+}
