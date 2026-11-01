@@ -432,8 +432,15 @@ impl ApplicationHandler<Repaint> for SoftwareHost {
         {
             self.fail(event_loop, error);
         }
-        // Always restore Wait when the last repaint is consumed. Never busy-poll.
-        event_loop.set_control_flow(self.schedule.control_flow());
+        // On Windows, winit can enter its native wait immediately after this
+        // callback, even if a frame requested exit. Use one expired deadline
+        // so shutdown reaches LoopExiting without waiting for unrelated input.
+        // Normal idle operation still sleeps indefinitely after its last frame.
+        event_loop.set_control_flow(if event_loop.exiting() {
+            ControlFlow::WaitUntil(Instant::now())
+        } else {
+            self.schedule.control_flow()
+        });
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
