@@ -61,12 +61,17 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          Copy-Item -LiteralPath target/x86_64-pc-windows-msvc/release/space-sniffer.exe -Destination "release/SpaceSniffer-$env:RELEASE_TAG.exe"
+          $assetName = "SpaceSniffer-$env:RELEASE_TAG.exe"
+          Copy-Item -LiteralPath target/x86_64-pc-windows-msvc/release/space-sniffer.exe -Destination "release/$assetName"
+          $digest = (Get-FileHash -LiteralPath "release/$assetName" -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'release/SHA256SUMS.txt'), "$digest  $assetName`n", [Text.UTF8Encoding]::new($false))
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: windows-executable
-          path: release/SpaceSniffer-${{ steps.version.outputs.release_tag }}.exe
+          path: |
+            release/SpaceSniffer-${{ steps.version.outputs.release_tag }}.exe
+            release/SHA256SUMS.txt
           if-no-files-found: error
 
   publish:
@@ -99,12 +104,28 @@ jobs:
           test -s "$executable"
           test -s "$notes"
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "$executable" --clobber
-            gh release edit "$RELEASE_TAG" --notes-file "$notes"
-          else
-            gh release create "$RELEASE_TAG" "$executable" \
-              --target "$RELEASE_SHA" --title "Space Sniffer $RELEASE_TAG" --notes-file "$notes"
+            echo 'This version already has a release. Bump the version instead of replacing it.' >&2
+            exit 1
           fi
+          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" > existing-tag.json 2>/dev/null; then
+            python3 -c 'import json, os; t=json.load(open("existing-tag.json"))["object"]; assert t["type"] == "commit" and t["sha"] == os.environ["RELEASE_SHA"], "Existing tag belongs to another commit"'
+          fi
+          (cd release && sha256sum --check SHA256SUMS.txt)
+          gh release create "$RELEASE_TAG" --draft \
+            --target "$RELEASE_SHA" --title "Space Sniffer $RELEASE_TAG" --notes-file "$notes"
+          gh release upload "$RELEASE_TAG" "$executable" release/SHA256SUMS.txt
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > uploaded-assets.json
+          python3 - <<'PY'
+          import hashlib, json, os
+          assets = json.load(open('uploaded-assets.json'))['assets']
+          for name in [f'SpaceSniffer-{os.environ["RELEASE_TAG"]}.exe', 'SHA256SUMS.txt']:
+              matches = [asset for asset in assets if asset['name'] == name]
+              data = open(f'release/{name}', 'rb').read()
+              assert len(matches) == 1 and matches[0]['size'] == len(data)
+              assert matches[0]['digest'] == 'sha256:' + hashlib.sha256(data).hexdigest()
+          assert len(assets) == 2
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false --latest
       - name: Verify release asset
         env:
           GH_TOKEN: ${{ github.token }}
@@ -113,4 +134,5 @@ jobs:
         run: |
           set -euo pipefail
           asset=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
-          test "$asset" = "SpaceSniffer-${RELEASE_TAG}.exe"
+          expected=$(printf '%s\n' "SpaceSniffer-${RELEASE_TAG}.exe" 'SHA256SUMS.txt' | sort)
+          test "$(printf '%s\n' "$asset" | sort)" = "$expected"
