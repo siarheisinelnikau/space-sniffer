@@ -438,6 +438,13 @@ impl ApplicationHandler<Repaint> for SoftwareHost {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.context.set_request_repaint_callback(|_| {});
+        #[cfg(feature = "screenshots")]
+        if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
+            // Capture is a read-only render-save-exit operation. In particular,
+            // do not wait for a settings fsync while other builds use the disk.
+            self.window = None;
+            return;
+        }
         if let Some(state) = &self.window {
             state.app.save(&mut self.storage);
             self.context
@@ -465,7 +472,7 @@ impl FileStore {
     fn new() -> Self {
         let path = std::env::var_os("APPDATA")
             .map(|path| PathBuf::from(path).join("Space Sniffer/data/app.ron"));
-        #[cfg(feature = "diagnostics")]
+        #[cfg(any(feature = "diagnostics", feature = "screenshots"))]
         let path = std::env::var_os("SPACE_SNIFFER_TEST_DATA")
             .map(|path| PathBuf::from(path).join("app.ron"))
             .or(path);
@@ -628,6 +635,27 @@ impl Drop for FrameTrace {
 }
 
 pub fn run(root: Option<PathBuf>, cleanup: Option<PathBuf>) -> Result<()> {
+    #[cfg(feature = "screenshots")]
+    if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
+        if std::env::var_os("SPACE_SNIFFER_TEST_DATA").is_none() {
+            return Err("Capture requires an isolated SPACE_SNIFFER_TEST_DATA directory".into());
+        }
+        if let Ok(code) = std::env::var("SPACE_SNIFFER_SCREENSHOT_LANGUAGE")
+            && space_sniffer::i18n::Language::from_code(&code).is_none()
+        {
+            return Err(format!("Unknown capture language: {code}").into());
+        }
+        if let Ok(theme) = std::env::var("SPACE_SNIFFER_SCREENSHOT_THEME")
+            && !matches!(theme.as_str(), "light" | "dark")
+        {
+            return Err(format!("Unknown capture theme: {theme}").into());
+        }
+        if let Ok(view) = std::env::var("SPACE_SNIFFER_SCREENSHOT_VIEW")
+            && !matches!(view.as_str(), "main" | "updates" | "help")
+        {
+            return Err(format!("Unknown capture view: {view}").into());
+        }
+    }
     let event_loop = EventLoop::<Repaint>::with_user_event().build()?;
     let context = egui::Context::default();
     let proxy = event_loop.create_proxy();
