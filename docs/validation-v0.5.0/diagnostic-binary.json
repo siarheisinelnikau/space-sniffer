@@ -1,0 +1,8 @@
+{
+  "pid": 41160,
+  "exit": 0,
+  "graphicsModules": [],
+  "executable": "E:\\work\\github\\space-sniffer\\.local\\localization-audit\\SpaceSniffer-v0.5.0-diagnostic.exe",
+  "exeHash": "D52385C464A389A1CF38039DB3B7A233189EB283CA61224E03AB020D9526F2D0",
+  "trace": "E:\\work\\github\\space-sniffer\\docs\\validation-v0.5.0\\render-trace.jsonl"
+}
