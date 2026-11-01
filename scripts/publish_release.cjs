@@ -51,6 +51,12 @@ module.exports = async ({github, context, core, root = process.cwd(), env = proc
     try {
       reference = (await github.rest.git.getRef({...repository, ref: `tags/${tag}`})).data.object;
     } catch (error) { if (error.status === 404) return; throw error; }
+    const seen = new Set();
+    for (let depth = 0; reference.type === 'tag'; depth++) {
+      if (depth >= 8 || seen.has(reference.sha)) throw new Error('Annotated version tag cycle or depth limit.');
+      seen.add(reference.sha);
+      reference = (await github.rest.git.getTag({...repository, tag_sha: reference.sha})).data.object;
+    }
     if (reference.type !== 'commit' || reference.sha !== commit) {
       throw new Error('An existing version tag belongs to another commit; tags are never moved.');
     }
