@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04, macos-15, macos-15-intel]
+        os: [windows-latest, ubuntu-22.04, ubuntu-24.04, macos-15, macos-15-intel]
         include:
           - os: macos-15
             macos_target: aarch64-apple-darwin
@@ -45,7 +45,8 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libx11-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libgl1-mesa-dev libegl1-mesa-dev libssl-dev
+            libgl1-mesa-dev libegl1-mesa-dev libssl-dev \
+            xvfb xauth desktop-file-utils dpkg-dev
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -55,12 +56,34 @@ jobs:
       - name: Build release
         run: cargo build --locked --release
       - uses: actions/setup-python@v5
-        if: runner.os == 'macOS'
+        if: runner.os != 'Windows'
         with:
           python-version: '3.13'
-      - name: Test macOS bundle tooling
-        if: runner.os == 'macOS'
+      - name: Test desktop packaging tools
+        if: runner.os != 'Windows'
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Package Ubuntu application
+        if: runner.os == 'Linux'
+        run: |
+          desktop-file-validate packaging/linux/space-sniffer.desktop
+          python3 scripts/package_linux.py
+          dpkg-deb --info target/debian/*.deb
+          dpkg-deb --contents target/debian/*.deb
+      - name: Check Linux CLI and X11 GUI
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked --features screenshots
+          python3 scripts/smoke_linux.py
+      - name: Upload Ubuntu package and GUI captures
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: space-sniffer-${{ matrix.os }}
+          path: |
+            target/debian/*.deb
+            target/linux-smoke/*.png
+            target/linux-smoke/scan.txt
+          if-no-files-found: error
       - name: Prepare experimental macOS app
         if: runner.os == 'macOS'
         run: python3 scripts/package_macos.py --target ${{ matrix.macos_target }} --binary target/release/space-sniffer

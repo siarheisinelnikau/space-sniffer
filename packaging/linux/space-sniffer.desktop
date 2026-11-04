@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Space Sniffer
+Comment=Explore disk usage with a live treemap
+Exec=space-sniffer %f
+TryExec=space-sniffer
+Icon=space-sniffer
+Terminal=false
+Categories=System;Filesystem;
+Keywords=disk;space;usage;treemap;
+StartupWMClass=space-sniffer

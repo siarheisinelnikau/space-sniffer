@@ -11,6 +11,20 @@ pub(super) fn roots() -> Vec<PathBuf> {
             roots.push(home);
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        let mut mounts: Vec<_> = super::linux::mounts()
+            .into_iter()
+            .filter(|v| v.shortcut)
+            .map(|v| v.mount)
+            .collect();
+        mounts.sort();
+        for mount in mounts {
+            if !roots.contains(&mount) {
+                roots.push(mount);
+            }
+        }
+    }
     roots
 }
 

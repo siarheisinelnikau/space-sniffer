@@ -29,6 +29,10 @@ enum Status {
 enum Event {
     Checked(Result<Option<Release>, String>),
     Downloaded(Result<Download, String>),
+    Installed {
+        download: Download,
+        result: Result<(), String>,
+    },
 }
 
 pub(super) struct Updates {
@@ -123,7 +127,7 @@ impl Updates {
     }
 
     /// Apply worker results. Installation still requires an explicit user action.
-    pub fn poll(&mut self) {
+    pub fn poll(&mut self, ctx: &egui::Context) {
         let event = match self.receiver.as_ref().map(Receiver::try_recv) {
             Some(Ok(event)) => event,
             Some(Err(mpsc::TryRecvError::Disconnected)) => {
@@ -150,6 +154,10 @@ impl Updates {
                 self.status = Status::Ready;
                 self.open = true;
             }
+            Event::Installed { download, result } => {
+                self.download = Some(download);
+                self.finish_install(ctx, result);
+            }
             Event::Checked(Err(error)) => {
                 self.status = Status::Idle;
                 self.error = Some(error);
@@ -157,6 +165,20 @@ impl Updates {
             Event::Downloaded(Err(error)) => {
                 self.status = Status::Available;
                 self.error = Some(error);
+            }
+        }
+    }
+
+    fn finish_install(&mut self, ctx: &egui::Context, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                self.status = Status::Installed;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(error) => {
+                self.status = Status::Ready;
+                self.open = true;
+                self.error = Some(format!("Could not prepare the update restart: {error}"));
             }
         }
     }
@@ -176,24 +198,18 @@ impl Updates {
     }
 
     pub fn restart(&mut self, ctx: &egui::Context, root: Option<&Path>) {
-        if self.status == Status::Installed {
+        if self.status != Status::Ready {
             return;
         }
-        let Some(download) = &mut self.download else {
+        let Some(mut download) = self.download.take() else {
             return;
         };
+        let root = root.map(Path::to_owned);
         self.status = Status::Installing;
-        match download.handoff(root) {
-            Ok(()) => {
-                self.status = Status::Installed;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            Err(error) => {
-                self.status = Status::Ready;
-                self.open = true;
-                self.error = Some(format!("Could not prepare the update restart: {error}"));
-            }
-        }
+        self.start(ctx, move || {
+            let result = download.handoff(root.as_deref());
+            Event::Installed { download, result }
+        });
     }
 
     fn begin_download(&mut self, ctx: &egui::Context, asset: Asset) {
@@ -257,22 +273,26 @@ impl Updates {
                         ui.label(language.text("Installing update…"));
                     }
                     Status::Installed => {
-                        ui.label(language.text("Restarting to install the verified update…"));
+                        ui.label(language.text("Restarting to finish the update…"));
                     }
                 }
                 if let Some(release) = &self.release {
                     ui.label(RichText::new(language.format("Version {0}", &[&release.version])).strong());
                     ui.hyperlink_to(language.text("View release on GitHub"), &release.page_url);
                     if !updater::CAN_INSTALL {
-                        ui.label(language.text("In-app installation is available for Windows x86-64. Build this platform from the release source."));
+                        ui.label(language.text("In-app installation supports Windows and Ubuntu x86-64. Use the release page for other platforms."));
                     } else if !release.asset.as_ref().is_some_and(|a| a.is_verifiable()) {
-                        ui.label(language.text("This release has no verified Windows executable. Use the release page to update manually."));
+                        ui.label(language.text("This release has no verified update package. Use the release page to update manually."));
                     } else if self.status == Status::Available && ui.button(language.text("Download and install")).clicked() {
                         let asset = release.asset.clone().unwrap();
                         self.begin_download(ctx, asset);
                     }
                     if self.status == Status::Ready {
-                        ui.small(language.text("The app will replace its executable and restart. The current root will be scanned again."));
+                        if cfg!(target_os = "linux") {
+                            ui.small(language.text("Ubuntu will ask for permission to install the verified package. The app will restart after installation."));
+                        } else {
+                            ui.small(language.text("The app will replace its executable and restart. The current root will be scanned again."));
+                        }
                         if ui.button(language.text("Install and restart")).clicked() {
                             restart = true;
                         }
@@ -379,10 +399,33 @@ mod tests {
         sender
             .send(Event::Downloaded(Err("checksum mismatch".into())))
             .unwrap();
-        updates.poll();
+        updates.poll(&egui::Context::default());
         assert!(updates.status == Status::Available);
         assert!(updates.download.is_none());
         assert_eq!(updates.error.as_deref(), Some("checksum mismatch"));
+    }
+
+    #[test]
+    fn cancelled_install_keeps_window_open_and_success_alone_requests_close() {
+        for success in [false, true] {
+            let ctx = egui::Context::default();
+            let mut updates = Updates::default();
+            updates.status = Status::Installing;
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                updates.finish_install(
+                    ctx,
+                    if success {
+                        Ok(())
+                    } else {
+                        Err("Authorization cancelled".into())
+                    },
+                );
+            });
+            let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert_eq!(commands.contains(&egui::ViewportCommand::Close), success);
+            assert_eq!(updates.status == Status::Ready, !success);
+            assert_eq!(updates.error.is_some(), !success);
+        }
     }
 
     #[test]

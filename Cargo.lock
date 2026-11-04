@@ -2581,8 +2581,9 @@ dependencies = [
 
 [[package]]
 name = "rust-auto-updator"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
+ "libc",
  "semver",
  "serde",
  "serde_json",
@@ -2941,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "space-sniffer"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytemuck",
  "eframe",

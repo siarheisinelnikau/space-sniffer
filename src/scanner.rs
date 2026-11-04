@@ -13,6 +13,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::time::{Duration, Instant};
 
 use crate::model::{EntryKind, Node, NodeId, ScanStats, ScanTree};
+use crate::scan_scope::ScanScope;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const CANCELLED: &str = "Scan cancelled";
@@ -179,6 +180,38 @@ fn scan_impl<const OBSERVE: bool, O: FnMut(&ScanTree)>(
     path: &Path,
     cancel: &AtomicBool,
     workers: usize,
+    report: impl FnMut(ScanProgress),
+    observe: O,
+) -> Result<ScanTree, String> {
+    scan_impl_scoped::<OBSERVE, _>(
+        path,
+        cancel,
+        workers,
+        &ScanScope::new(path),
+        report,
+        observe,
+    )
+}
+
+pub(crate) fn scan_scoped<const OBSERVE: bool>(
+    path: &Path,
+    cancel: &AtomicBool,
+    scope: &ScanScope,
+    report: impl FnMut(ScanProgress),
+    observe: impl FnMut(&ScanTree),
+) -> Result<ScanTree, String> {
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(MAX_SCAN_WORKERS);
+    scan_impl_scoped::<OBSERVE, _>(path, cancel, workers, scope, report, observe)
+}
+
+fn scan_impl_scoped<const OBSERVE: bool, O: FnMut(&ScanTree)>(
+    path: &Path,
+    cancel: &AtomicBool,
+    workers: usize,
+    scope: &ScanScope,
     mut report: impl FnMut(ScanProgress),
     observe: O,
 ) -> Result<ScanTree, String> {
@@ -189,6 +222,7 @@ fn scan_impl<const OBSERVE: bool, O: FnMut(&ScanTree)>(
     let absolute_path = std::path::absolute(path)
         .map_err(|error| format!("Unable to resolve {}: {error}", path.display()))?;
     let path = absolute_path.as_path();
+    scope.validate(path)?;
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("Unable to inspect {}: {error}", path.display()))?;
     if is_link(&metadata) {
@@ -231,6 +265,7 @@ fn scan_impl<const OBSERVE: bool, O: FnMut(&ScanTree)>(
             &mut report,
             &mut last_report,
             &mut observer,
+            scope,
         )?
     } else {
         Vec::new()
@@ -466,6 +501,7 @@ impl DirectoryBatch {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_directories<const OBSERVE: bool, O: FnMut(&ScanTree)>(
     tree: &mut ScanTree,
     bytes: &mut u64,
@@ -474,6 +510,7 @@ fn scan_directories<const OBSERVE: bool, O: FnMut(&ScanTree)>(
     report: &mut impl FnMut(ScanProgress),
     last_report: &mut Instant,
     observer: &mut ScanObserver<OBSERVE, O>,
+    scan_scope: &ScanScope,
 ) -> Result<Vec<NodeId>, String> {
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
@@ -492,7 +529,7 @@ fn scan_directories<const OBSERVE: bool, O: FnMut(&ScanTree)>(
                         if cancel.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
                             break;
                         }
-                        if !read_directory(worker, job, cancel, stop, &results) {
+                        if !read_directory(worker, job, cancel, stop, &results, scan_scope) {
                             break;
                         }
                     }
@@ -610,8 +647,14 @@ fn read_directory(
     cancel: &AtomicBool,
     stop: &AtomicBool,
     results: &SyncSender<DirectoryBatch>,
+    scope: &ScanScope,
 ) -> bool {
     let mut batch = DirectoryBatch::new(worker, job.id);
+    if !scope.allows(&job.path) {
+        batch.done = true;
+        batch.skipped = 1;
+        return results.send(batch).is_ok();
+    }
     // Recheck queued paths before enumeration: they may have become junctions.
     let metadata = match fs::symlink_metadata(&job.path) {
         Ok(metadata) => metadata,
@@ -647,6 +690,12 @@ fn read_directory(
         // No link traversal. Windows reuses cached enumeration metadata here;
         // Unix performs the equivalent of symlink_metadata for each entry.
         let node = entry.and_then(|entry| {
+            let path = entry.path();
+            // Check before metadata/read_dir: pseudo files may report enormous
+            // logical sizes, and autofs/portal mounts can block on access.
+            if !scope.allows(&path) {
+                return Ok(None);
+            }
             let metadata = entry.metadata()?;
             let kind = if is_link(&metadata) {
                 EntryKind::Symlink
@@ -657,7 +706,7 @@ fn read_directory(
             } else {
                 return Ok(None);
             };
-            Ok(Some(make_node(entry.path(), kind, &metadata, Some(job.id))))
+            Ok(Some(make_node(path, kind, &metadata, Some(job.id))))
         });
         match node {
             Ok(Some(node)) => batch.nodes.push(node),
@@ -1007,7 +1056,14 @@ mod tests {
             let stop = &stop;
             let path = directory.0.clone();
             let worker = scope.spawn(move || {
-                read_directory(0, DirectoryJob { id: 0, path }, cancel, stop, &sender)
+                read_directory(
+                    0,
+                    DirectoryJob { id: 0, path },
+                    cancel,
+                    stop,
+                    &sender,
+                    &ScanScope::default(),
+                )
             });
             let batch = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
             assert_eq!(batch.nodes.len(), DIRECTORY_BATCH_SIZE);
@@ -1016,6 +1072,58 @@ mod tests {
             drop(receiver);
             assert!(!worker.join().unwrap());
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn excluded_mounts_never_enter_totals_or_previews() {
+        let directory = TestDirectory::new();
+        let virtual_dir = directory.0.join("kernel");
+        let disk = directory.0.join("disk");
+        fs::create_dir(&virtual_dir).unwrap();
+        fs::create_dir(&disk).unwrap();
+        // A sparse stand-in for procfs' enormous, regular-looking kcore file.
+        fs::File::create(virtual_dir.join("kcore"))
+            .unwrap()
+            .set_len(1 << 40)
+            .unwrap();
+        fs::write(disk.join("data"), [0; 11]).unwrap();
+        fs::write(directory.0.join("file"), [0; 3]).unwrap();
+        let scope = ScanScope::excluding([virtual_dir.clone()]);
+        for workers in [1, 4] {
+            let tree = scan_impl_scoped::<true, _>(
+                &directory.0,
+                &AtomicBool::new(false),
+                workers,
+                &scope,
+                |_| {},
+                |tree| {
+                    assert!(tree.nodes.iter().all(|n| !n.path.starts_with(&virtual_dir)));
+                },
+            )
+            .unwrap();
+            assert_eq!(tree.total_size(), 14);
+            assert_eq!(tree.stats.files, 2);
+            assert_eq!(tree.stats.directories, 2);
+            assert_eq!(tree.stats.skipped, 1);
+        }
+        assert!(
+            scan_scoped::<false>(
+                &virtual_dir.join("kcore"),
+                &AtomicBool::new(false),
+                &scope,
+                |_| {},
+                |_| {}
+            )
+            .is_err()
+        );
+        // Real sparse files retain their logical size when explicitly scanned.
+        assert_eq!(
+            scan_path(&virtual_dir.join("kcore"), &AtomicBool::new(false))
+                .unwrap()
+                .total_size(),
+            1 << 40
+        );
     }
 
     #[test]

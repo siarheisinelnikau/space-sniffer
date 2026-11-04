@@ -27,13 +27,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'create' && github.event.ref || github.ref }}
+          ref: ${{ github.sha }}
       - name: Provision shared updater source
         shell: pwsh
         run: ./scripts/provision-shared-updater.ps1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
       - name: Verify release version
         id: version
         shell: pwsh
@@ -54,6 +55,10 @@ jobs:
           "release_sha=$(git rev-parse HEAD)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Test draft recovery without GitHub requests
         run: node --test scripts/test_publish_release.cjs
+      - name: Formatting and lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
       - name: Test
         run: cargo test --locked --all-targets --target x86_64-pc-windows-msvc
       - name: Build release
@@ -77,9 +82,73 @@ jobs:
             release/SHA256SUMS.txt
           if-no-files-found: error
 
+  ubuntu:
+    if: (github.event_name == 'push' && (github.ref_type == 'tag' || !github.event.created)) || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'codex/release-v'))
+    name: Build Ubuntu package
+    runs-on: ubuntu-22.04
+    outputs:
+      release_sha: ${{ steps.version.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Provision shared updater source
+        shell: pwsh
+        run: ./scripts/provision-shared-updater.ps1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install build and GUI test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libx11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libssl-dev xvfb xauth \
+            desktop-file-utils dpkg-dev
+      - name: Verify release version
+        id: version
+        env:
+          RELEASE_REF: ${{ github.event_name == 'create' && github.event.ref || github.ref_name }}
+        run: |
+          python3 - <<'PYCODE'
+          import os, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          tag = os.environ['RELEASE_REF'].removeprefix('codex/release-')
+          assert tag == f'v{version}', 'Release ref must match Cargo version'
+          assert Path(f'docs/release-notes/{tag}.md').stat().st_size > 100
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"release_sha={os.environ['GITHUB_SHA']}\n")
+          PYCODE
+      - name: Test and lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --all-targets
+          python3 -m unittest discover -s scripts -p 'test_package*.py'
+      - name: Check X11 startup and Updates
+        run: |
+          cargo build --locked --features screenshots
+          python3 scripts/smoke_linux.py
+      - name: Build normal release package
+        run: |
+          cargo build --locked --release
+          python3 scripts/package_linux.py
+          desktop-file-validate packaging/linux/space-sniffer.desktop
+          dpkg-deb --info target/debian/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-package
+          path: target/debian/*.deb
+          if-no-files-found: error
+
   publish:
-    name: Publish standalone executable
-    needs: build
+    name: Publish Windows and Ubuntu updates
+    needs: [build, ubuntu]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -94,6 +163,19 @@ jobs:
         with:
           name: windows-executable
           path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-package
+          path: release
+      - name: Verify matching builds and combine checksums
+        env:
+          WINDOWS_SHA: ${{ needs.build.outputs.release_sha }}
+          UBUNTU_SHA: ${{ needs.ubuntu.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          test "$WINDOWS_SHA" = "$UBUNTU_SHA"
+          cd release
+          sha256sum "SpaceSniffer-$RELEASE_TAG.exe" "space-sniffer_${RELEASE_TAG#v}_amd64.deb" > SHA256SUMS.txt
       - name: Resume only the owned draft and publish verified assets
         uses: actions/github-script@v7
         env:
