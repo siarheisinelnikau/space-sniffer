@@ -69,17 +69,14 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          $assetName = "SpaceSniffer-$env:RELEASE_TAG.exe"
+          $assetName = "SpaceSniffer-${env:RELEASE_TAG}-windows-amd64.exe"
           Copy-Item -LiteralPath target/x86_64-pc-windows-msvc/release/space-sniffer.exe -Destination "release/$assetName"
-          $digest = (Get-FileHash -LiteralPath "release/$assetName" -Algorithm SHA256).Hash.ToLowerInvariant()
-          [IO.File]::WriteAllText((Join-Path (Get-Location) 'release/SHA256SUMS.txt'), "$digest  $assetName`n", [Text.UTF8Encoding]::new($false))
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: windows-executable
           path: |
-            release/SpaceSniffer-${{ steps.version.outputs.release_tag }}.exe
-            release/SHA256SUMS.txt
+            release/SpaceSniffer-${{ steps.version.outputs.release_tag }}-windows-amd64.exe
           if-no-files-found: error
 
   ubuntu:
@@ -174,8 +171,7 @@ jobs:
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
         run: |
           test "$WINDOWS_SHA" = "$UBUNTU_SHA"
-          cd release
-          sha256sum "SpaceSniffer-$RELEASE_TAG.exe" "space-sniffer_${RELEASE_TAG#v}_amd64.deb" > SHA256SUMS.txt
+          node scripts/release-assets.cjs
       - name: Resume only the owned draft and publish verified assets
         uses: actions/github-script@v7
         env:

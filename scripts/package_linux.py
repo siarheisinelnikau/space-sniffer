@@ -77,7 +77,7 @@ def package(binary: Path, output: Path) -> Path:
     with (REPOSITORY / "Cargo.toml").open("rb") as source:
         version = tomllib.load(source)["package"]["version"]
     output.mkdir(parents=True, exist_ok=True)
-    destination = output / f"space-sniffer_{version}_{arch}.deb"
+    destination = output / f"SpaceSniffer-v{version}-ubuntu-{arch}.deb"
     if destination.exists():
         raise FileExistsError(destination)
     with tempfile.TemporaryDirectory(prefix="space-sniffer-deb-") as temporary:

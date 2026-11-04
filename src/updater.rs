@@ -25,16 +25,27 @@ pub fn config() -> Result<Config, String> {
         CURRENT_VERSION,
         "space-sniffer",
     )?;
+    config.asset_platform = Some(
+        if cfg!(target_os = "linux") {
+            "ubuntu"
+        } else {
+            "windows"
+        }
+        .into(),
+    );
     config.allow_asset_digest = true;
     #[cfg(not(target_os = "linux"))]
     {
-        config.legacy_executable_names = vec!["space-sniffer.exe".into()];
+        config.legacy_executable_names =
+            vec!["SpaceSniffer.exe".into(), "space-sniffer.exe".into()];
         config.expected_subsystem = Some(2);
         config.install.helper_name = "SpaceSniffer-updater.exe".into();
     }
     #[cfg(target_os = "linux")]
     {
         config.product_name = "SpaceSniffer".into();
+        config.legacy_executable_names =
+            vec!["SpaceSniffer.deb".into(), "space-sniffer.deb".into()];
         config.install.helper_name = "space-sniffer-updater".into();
     }
     config.max_executable_size = 256 * 1024 * 1024;
@@ -136,11 +147,25 @@ mod tests {
     #[test]
     fn release_selection_stays_bound_to_the_product_and_accepts_legacy_names() {
         let config = config().unwrap();
-        let names = if cfg!(target_os = "linux") {
-            vec![config.executable_name(&"9.0.0".parse().unwrap())]
+        let version = "9.0.0".parse().unwrap();
+        let names = config.executable_names(&version);
+        let platform = if cfg!(target_os = "linux") {
+            "ubuntu"
         } else {
-            vec!["SpaceSniffer-v9.0.0.exe".into(), "space-sniffer.exe".into()]
+            "windows"
         };
+        let extension = if cfg!(target_os = "linux") {
+            "deb"
+        } else {
+            "exe"
+        };
+        assert_eq!(
+            names[0],
+            format!(
+                "SpaceSniffer-v9.0.0-{platform}-{}.{extension}",
+                config.architecture.debian_name()
+            )
+        );
         for name in names {
             let release = serde_json::json!({"tag_name":"v9.0.0","html_url":"https://github.com/siarheisinelnikau/space-sniffer/releases/tag/v9.0.0","draft":false,"prerelease":false,
                 "assets":[{"name":name,"size":1024,"browser_download_url":format!("https://github.com/siarheisinelnikau/space-sniffer/releases/download/v9.0.0/{name}"),"digest":format!("sha256:{}","ab".repeat(32))}]});

@@ -1,10 +1,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const {releaseAssets} = require('./release-assets.cjs');
 
 const PUBLISHER_PATHS = new Set([
   '.github/workflows/release.yml',
   'scripts/publish_release.cjs',
+  'scripts/release-assets.cjs',
   'scripts/release-draft-lease.json',
   'scripts/test_publish_release.cjs',
 ]);
@@ -29,12 +31,19 @@ module.exports = async ({github, context, core, root = process.cwd(), env = proc
   if (notes.length < 100 || !notes.includes(version)) throw new Error('Missing reviewed release notes.');
   const marker = `<!-- space-sniffer-publisher:v1 ${tag} ${commit} -->`;
   const markedNotes = `${notes}\n\n${marker}`;
-  const names = [`SpaceSniffer-${tag}.exe`, `space-sniffer_${version}_amd64.deb`, 'SHA256SUMS.txt'];
-  const expected = names.map(assetName => {
+  const assets = releaseAssets(tag);
+  const names = assets.map(asset => asset.name);
+  const expected = assets.map(spec => {
+    const assetName = spec.name;
     const data = fs.readFileSync(path.join(root, 'release', assetName));
     if (!data.length) throw new Error(`Empty release asset: ${assetName}`);
-    return {name: assetName, size: data.length, digest: digestOf(data), data};
+    return {...spec, size: data.length, digest: digestOf(data), data};
   });
+  for (const asset of expected.filter(item => item.aliasOf)) {
+    if (!asset.data.equals(expected.find(item => item.name === asset.aliasOf).data)) {
+      throw new Error('Compatibility asset differs from its canonical file.');
+    }
+  }
   const checksum = expected.slice(0, -1).map(asset => `${asset.digest.slice(7)}  ${asset.name}`).join('\n');
   if (expected.at(-1).data.toString('utf8').trim() !== checksum) throw new Error('The checked release checksums differ.');
   const lease = JSON.parse(fs.readFileSync(path.join(root, 'scripts/release-draft-lease.json'), 'utf8'));
@@ -134,7 +143,7 @@ module.exports = async ({github, context, core, root = process.cwd(), env = proc
       await github.rest.repos.deleteReleaseAsset({...repository, asset_id: existing.id});
     }
     const uploaded = (await github.rest.repos.uploadReleaseAsset({
-      ...repository, release_id: releaseId, name: asset.name, data: asset.data,
+      ...repository, release_id: releaseId, name: asset.name, label: asset.label, data: asset.data,
       headers: {'content-type': 'application/octet-stream', 'content-length': asset.size},
     })).data;
     if (!matches(uploaded, asset)) throw new Error(`Uploaded digest differs; release remains a draft: ${asset.name}`);

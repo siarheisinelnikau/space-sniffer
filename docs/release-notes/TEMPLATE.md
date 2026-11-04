@@ -16,6 +16,6 @@ Replace this paragraph with a brief English summary of verified changes since th
 
 ## Download and upgrade
 
-Download `SpaceSniffer-vVERSION.exe` for Windows x86-64. This is a standalone portable executable. State any additional upgrade steps, breaking changes, or known limitations that apply to this release.
+Download `SpaceSniffer-vVERSION-windows-amd64.exe` for Windows x86-64. This is a standalone portable executable. Ubuntu x86-64 uses `SpaceSniffer-vVERSION-ubuntu-amd64.deb`. State any additional upgrade steps, breaking changes, or known limitations that apply to this release.
 
 Optional full changelog: link the preceding release tag to this release tag after verifying the comparison baseline.
