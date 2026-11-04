@@ -1427,6 +1427,32 @@ impl App {
         });
     }
 
+    fn file_legend(&self, ui: &mut egui::Ui) {
+        let language = self.preferences.language;
+        let colors = MAP_PALETTES[usize::from(self.classic)];
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for (color, label) in [
+                (colors.folder, language.text("Folders")),
+                (colors.exe, ".exe"),
+                (colors.file, language.text("Other files")),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    ui.painter().rect(
+                        rect,
+                        2.0,
+                        color,
+                        Stroke::new(1.0_f32, ui.visuals().weak_text_color()),
+                        StrokeKind::Inside,
+                    );
+                    ui.small(label);
+                });
+            }
+        });
+    }
+
     fn canvas(&mut self, ui: &mut egui::Ui) {
         let language = self.preferences.language;
         let palette = self.preferences.theme.palette();
@@ -1447,7 +1473,6 @@ impl App {
                     self.zoom,
                     area.shrink(2.0),
                     self.depth,
-                    0,
                     &mut tiles,
                 );
             }
@@ -1693,6 +1718,9 @@ impl App {
                 }
                 if self.loaded {
                     self.toolbar(ui);
+                    if !self.color_by_volume {
+                        self.file_legend(ui);
+                    }
                     self.canvas(ui);
                 } else {
                     self.welcome(ui);
@@ -1806,20 +1834,17 @@ fn collect_tiles(
     id: usize,
     rect: Rect,
     remaining: usize,
-    level: usize,
     out: &mut Vec<DrawTile>,
 ) {
-    collect_tiles_with_limit(tree, weights, id, rect, remaining, level, out, 8000);
+    collect_tiles_with_limit(tree, weights, id, rect, remaining, out, 8000);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn collect_tiles_with_limit(
     tree: &ScanTree,
     weights: &[u64],
     id: usize,
     rect: Rect,
     remaining: usize,
-    level: usize,
     out: &mut Vec<DrawTile>,
     ceiling: usize,
 ) {
@@ -1838,7 +1863,7 @@ fn collect_tiles_with_limit(
         container,
         bytes: weights[id],
         collapsed: 0,
-        colors: [color(node, false, level), color(node, true, level)],
+        colors: tile_colors(node),
         volume: None,
     });
     if !container || out.len() >= ceiling {
@@ -1874,7 +1899,7 @@ fn collect_tiles_with_limit(
                 container: false,
                 bytes: items.collapsed_bytes,
                 collapsed: items.collapsed_count,
-                colors: [color(node, false, level + 1), color(node, true, level + 1)],
+                colors: MAP_PALETTES.map(|palette| palette.file),
                 volume: None,
             });
             continue;
@@ -1887,7 +1912,6 @@ fn collect_tiles_with_limit(
             tile.id,
             bounds,
             remaining - 1,
-            level + 1,
             out,
             ceiling - (siblings - index - 1),
         );
@@ -1915,42 +1939,65 @@ fn volume_color(index: usize) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
-fn color(node: &Node, classic: bool, level: usize) -> Color32 {
-    if node.is_dir() {
-        if classic {
-            return Color32::from_rgb(145, 108, 70).gamma_multiply(1.0 + level as f32 * 0.06);
-        }
-        return Color32::from_rgb(42, 55, 75).gamma_multiply(1.0 + level as f32 * 0.10);
-    }
-    let extension = node
-        .path
-        .extension()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    if classic {
-        return if ["exe", "dll", "bin"].contains(&extension.as_str()) {
-            Color32::from_rgb(81, 128, 169)
+#[derive(Clone, Copy)]
+struct MapPalette {
+    folder: Color32,
+    exe: Color32,
+    file: Color32,
+}
+
+const MAP_PALETTES: [MapPalette; 2] = [
+    MapPalette {
+        folder: Color32::from_rgb(42, 55, 75),
+        exe: Color32::from_rgb(113, 94, 157),
+        file: Color32::from_rgb(76, 99, 128),
+    },
+    MapPalette {
+        folder: Color32::from_rgb(145, 108, 70),
+        exe: Color32::from_rgb(81, 128, 169),
+        file: Color32::from_rgb(174, 133, 88),
+    },
+];
+
+fn tile_colors(node: &Node) -> [Color32; 2] {
+    let is_exe = node.kind == EntryKind::File
+        && node
+            .path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
+    MAP_PALETTES.map(|palette| {
+        if node.is_dir() {
+            palette.folder
+        } else if is_exe {
+            palette.exe
         } else {
-            Color32::from_rgb(174, 133, 88)
-        };
-    }
-    match extension.as_str() {
-        "rs" | "js" | "ts" | "tsx" | "py" | "html" | "css" | "toml" | "json" | "c" | "cpp"
-        | "h" | "md" => Color32::from_rgb(64, 111, 161),
-        "mp4" | "mov" | "mkv" | "mp3" | "wav" | "flac" | "avi" => Color32::from_rgb(167, 120, 62),
-        "jpg" | "jpeg" | "png" | "raw" | "webp" | "gif" | "svg" | "fig" => {
-            Color32::from_rgb(51, 128, 122)
+            palette.file
         }
-        "zip" | "7z" | "gz" | "tar" | "rar" | "iso" => Color32::from_rgb(156, 84, 108),
-        "exe" | "dll" | "msi" | "dmg" | "app" | "so" => Color32::from_rgb(113, 94, 157),
-        _ => Color32::from_rgb(76, 99, 128),
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_palette_distinguishes_folders_exes_and_other_files() {
+        let tree = tree(0);
+        let mut folder = tree.nodes[1].clone();
+        folder.path.set_file_name("folder.exe");
+        assert_eq!(
+            tile_colors(&folder),
+            MAP_PALETTES.map(|palette| palette.folder)
+        );
+
+        let mut file = tree.nodes[2].clone();
+        for name in ["archive.zip", "library.so", "notes.txt", "no-extension"] {
+            file.path.set_file_name(name);
+            assert_eq!(tile_colors(&file), MAP_PALETTES.map(|palette| palette.file));
+        }
+        file.path.set_file_name("setup.EXE");
+        assert_eq!(tile_colors(&file), MAP_PALETTES.map(|palette| palette.exe));
+    }
 
     #[test]
     fn volume_colors_reuse_geometry_and_settings_survive_restart() {
@@ -2341,7 +2388,6 @@ mod tests {
             0,
             Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0)),
             4,
-            0,
             &mut tiles,
         );
         assert!(tiles.len() <= 8000);
@@ -2720,7 +2766,6 @@ mod tests {
             0,
             Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0)),
             4,
-            0,
             &mut tiles,
         );
         assert!(tiles.iter().any(|tile| tile.bytes > 0 && !tile.container));

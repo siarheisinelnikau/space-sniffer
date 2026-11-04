@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "space-sniffer"
-version = "0.6.1"
+version = "0.6.3"
 dependencies = [
  "bytemuck",
  "eframe",
