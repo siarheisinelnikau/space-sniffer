@@ -28,7 +28,7 @@ the `space-sniffer` checkout:
 
 ```sh
 git clone https://github.com/siarheisinelnikau/rust-auto-updator.git
-git -C rust-auto-updator checkout b26501feda713389b64944ca3bc048aa35699cf9
+git -C rust-auto-updator checkout 093e937cae174e0ec57c4485d8ce3b36d90e11f8
 cd space-sniffer
 cargo build --locked --release
 ./target/release/space-sniffer
