@@ -6,9 +6,9 @@ A native, live disk usage explorer written in Rust with [egui](https://github.co
 
 [Download Windows .exe / Ubuntu .deb](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Ubuntu build and install](docs/ubuntu.md) · [Performance notes](docs/performance.md)
 
-![Space Sniffer on Ubuntu with dark-blue folders, purple EXE files, and gray-blue files](docs/screenshot.png)
+![Space Sniffer on Ubuntu with dark-blue folders, purple application packages, and gray-blue files](docs/screenshot.png)
 
-Space Sniffer 0.6.3 on Ubuntu, rendered by the application with an isolated sample folder. The key above the map identifies the three colors.
+Space Sniffer 0.6.4 on Ubuntu, rendered by the application with an isolated sample folder. The key above the map identifies the three colors.
 
 This is an independent implementation inspired by [SpaceSniffer by Uderzo Software](https://www.uderzo.it/main_products/space_sniffer/). It is not affiliated with Uderzo Software and does not use the original application's source code or assets.
 
@@ -144,7 +144,7 @@ Large filters show **Filtering** progress while the previous filter stays visibl
 | **Classic** | Switch the treemap palette |
 | **Copy path** / **Reveal** | Copy the selection's path / open the system file manager |
 
-The key above the map shows three colors. In the default palette, folders are dark blue, `.exe` files are purple, and all other files are gray-blue. **Classic** uses the same categories with different colors. With **Color by volume** enabled, use **Volumes in view** for the color key.
+The key above the map shows three colors. In the default palette, folders are dark blue, application files are purple, and other files are gray-blue. On Ubuntu and other Linux systems, the application category includes `.deb`, `.AppImage`, `.snap`, and `.flatpak` files. Windows highlights `.exe` files. **Classic** uses the same categories with different colors. With **Color by volume** enabled, use **Volumes in view** for the color key.
 
 Zero-byte entries are available in the list but have no treemap area. During scanning, the inspector lists up to 100 discovered children; after completion it lists up to 100 of the largest children.
 
