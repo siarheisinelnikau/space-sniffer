@@ -1,12 +1,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const {releaseAssets} = require('./release-assets.cjs');
 
 const PUBLISHER_PATHS = new Set([
   '.github/workflows/release.yml',
   'scripts/publish_release.cjs',
-  'scripts/release-assets.cjs',
   'scripts/release-draft-lease.json',
   'scripts/test_publish_release.cjs',
 ]);
@@ -23,7 +21,8 @@ module.exports = async ({github, context, core, root = process.cwd(), env = proc
   const commit = env.RELEASE_SHA;
   const cargo = fs.readFileSync(path.join(root, 'Cargo.toml'), 'utf8');
   const version = cargo.match(/^version\s*=\s*"(\d+\.\d+\.\d+)"\s*$/m)?.[1];
-  if (!version || tag !== `v${version}` || !/^[0-9a-f]{40}$/.test(commit) || commit !== context.sha) {
+  if (!version || tag !== `v${version}` || context.ref !== `refs/tags/${tag}` ||
+      !/^[0-9a-f]{40}$/.test(commit) || commit !== context.sha) {
     throw new Error('The checked commit, Cargo version and release tag must match.');
   }
   const name = `Space Sniffer ${tag}`;
@@ -31,21 +30,12 @@ module.exports = async ({github, context, core, root = process.cwd(), env = proc
   if (notes.length < 100 || !notes.includes(version)) throw new Error('Missing reviewed release notes.');
   const marker = `<!-- space-sniffer-publisher:v1 ${tag} ${commit} -->`;
   const markedNotes = `${notes}\n\n${marker}`;
-  const assets = releaseAssets(tag);
-  const names = assets.map(asset => asset.name);
-  const expected = assets.map(spec => {
-    const assetName = spec.name;
-    const data = fs.readFileSync(path.join(root, 'release', assetName));
-    if (!data.length) throw new Error(`Empty release asset: ${assetName}`);
-    return {...spec, size: data.length, digest: digestOf(data), data};
+  const names = [`SpaceSniffer-${tag}-windows-amd64.exe`, `SpaceSniffer-${tag}-ubuntu-amd64.deb`];
+  const expected = names.map(name => {
+    const data = fs.readFileSync(path.join(root, 'release', name));
+    if (!data.length) throw new Error(`Empty release asset: ${name}`);
+    return {name, size: data.length, digest: digestOf(data), data};
   });
-  for (const asset of expected.filter(item => item.aliasOf)) {
-    if (!asset.data.equals(expected.find(item => item.name === asset.aliasOf).data)) {
-      throw new Error('Compatibility asset differs from its canonical file.');
-    }
-  }
-  const checksum = expected.slice(0, -1).map(asset => `${asset.digest.slice(7)}  ${asset.name}`).join('\n');
-  if (expected.at(-1).data.toString('utf8').trim() !== checksum) throw new Error('The checked release checksums differ.');
   const lease = JSON.parse(fs.readFileSync(path.join(root, 'scripts/release-draft-lease.json'), 'utf8'));
   const activeLease = lease.tag === tag;
   if (activeLease && (lease.repository !== fullName || lease.name !== name ||
@@ -59,7 +49,10 @@ module.exports = async ({github, context, core, root = process.cwd(), env = proc
     let reference;
     try {
       reference = (await github.rest.git.getRef({...repository, ref: `tags/${tag}`})).data.object;
-    } catch (error) { if (error.status === 404) return; throw error; }
+    } catch (error) {
+      if (error.status === 404) throw new Error('The version tag no longer exists.');
+      throw error;
+    }
     const seen = new Set();
     for (let depth = 0; reference.type === 'tag'; depth++) {
       if (depth >= 8 || seen.has(reference.sha)) throw new Error('Annotated version tag cycle or depth limit.');
@@ -143,7 +136,7 @@ module.exports = async ({github, context, core, root = process.cwd(), env = proc
       await github.rest.repos.deleteReleaseAsset({...repository, asset_id: existing.id});
     }
     const uploaded = (await github.rest.repos.uploadReleaseAsset({
-      ...repository, release_id: releaseId, name: asset.name, label: asset.label, data: asset.data,
+      ...repository, release_id: releaseId, name: asset.name, data: asset.data,
       headers: {'content-type': 'application/octet-stream', 'content-length': asset.size},
     })).data;
     if (!matches(uploaded, asset)) throw new Error(`Uploaded digest differs; release remains a draft: ${asset.name}`);

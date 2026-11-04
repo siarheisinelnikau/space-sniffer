@@ -3,8 +3,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-    branches: ['codex/release-v*']
-  create:
 
 permissions:
   contents: read
@@ -18,7 +16,6 @@ env:
 
 jobs:
   build:
-    if: (github.event_name == 'push' && (github.ref_type == 'tag' || !github.event.created)) || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'codex/release-v'))
     name: Build Windows executable
     runs-on: windows-latest
     outputs:
@@ -39,11 +36,11 @@ jobs:
         id: version
         shell: pwsh
         env:
-          RELEASE_REF: ${{ github.event_name == 'create' && github.event.ref || github.ref_name }}
+          RELEASE_REF: ${{ github.ref_name }}
         run: |
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object name -eq 'space-sniffer').version
-          $releaseTag = $env:RELEASE_REF -replace '^codex/release-', ''
+          $releaseTag = $env:RELEASE_REF
           if ($releaseTag -ne "v$version") {
             throw "Release ref $env:RELEASE_REF must match package version v$version for in-app updates."
           }
@@ -80,7 +77,6 @@ jobs:
           if-no-files-found: error
 
   ubuntu:
-    if: (github.event_name == 'push' && (github.ref_type == 'tag' || !github.event.created)) || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'codex/release-v'))
     name: Build Ubuntu package
     runs-on: ubuntu-22.04
     outputs:
@@ -109,13 +105,13 @@ jobs:
       - name: Verify release version
         id: version
         env:
-          RELEASE_REF: ${{ github.event_name == 'create' && github.event.ref || github.ref_name }}
+          RELEASE_REF: ${{ github.ref_name }}
         run: |
           python3 - <<'PYCODE'
           import os, tomllib
           from pathlib import Path
           version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
-          tag = os.environ['RELEASE_REF'].removeprefix('codex/release-')
+          tag = os.environ['RELEASE_REF']
           assert tag == f'v{version}', 'Release ref must match Cargo version'
           assert Path(f'docs/release-notes/{tag}.md').stat().st_size > 100
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
@@ -164,14 +160,11 @@ jobs:
         with:
           name: ubuntu-package
           path: release
-      - name: Verify matching builds and combine checksums
+      - name: Verify matching builds
         env:
           WINDOWS_SHA: ${{ needs.build.outputs.release_sha }}
           UBUNTU_SHA: ${{ needs.ubuntu.outputs.release_sha }}
-          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
-        run: |
-          test "$WINDOWS_SHA" = "$UBUNTU_SHA"
-          node scripts/release-assets.cjs
+        run: test "$WINDOWS_SHA" = "$UBUNTU_SHA"
       - name: Resume only the owned draft and publish verified assets
         uses: actions/github-script@v7
         env:
