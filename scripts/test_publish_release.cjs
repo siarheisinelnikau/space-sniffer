@@ -16,24 +16,20 @@ function fixture(options = {}) {
   fs.mkdirSync(path.join(root, 'release'));
   const old = 'a'.repeat(40);
   const current = 'b'.repeat(40);
-  const tag = 'v0.6.1';
-  const notes = '# Space Sniffer v0.6.1\n\n' + 'Verified localization and saved light/dark theme controls. '.repeat(3);
-  fs.writeFileSync(path.join(root, 'Cargo.toml'), '[package]\nversion = "0.6.1"\n');
+  const tag = 'v0.6.2';
+  const notes = '# Space Sniffer v0.6.2\n\n' + 'Verified localization and saved light/dark theme controls. '.repeat(3);
+  fs.writeFileSync(path.join(root, 'Cargo.toml'), '[package]\nversion = "0.6.2"\n');
   fs.writeFileSync(path.join(root, `docs/release-notes/${tag}.md`), notes);
   const asset = (name, data, id) => ({name, size: data.length, digest: sha(data), id});
   const oldExecutable = Buffer.from('Original checked executable fixture');
   const executable = Buffer.from('New checked executable fixture');
   const debian = Buffer.from('Checked Debian package fixture');
-  const names = [`SpaceSniffer-${tag}-windows-amd64.exe`, `SpaceSniffer-${tag}-ubuntu-amd64.deb`, `SpaceSniffer-${tag}.exe`, `space-sniffer_${tag.slice(1)}_amd64.deb`];
-  const oldData = [oldExecutable, debian, oldExecutable, debian];
-  const newData = [executable, debian, executable, debian];
-  const sums = data => Buffer.from(names.map((name, index) => `${sha(data[index]).slice(7)}  ${name}\n`).join(''));
-  const oldChecksum = sums(oldData);
-  const checksum = sums(newData);
+  const names = [`SpaceSniffer-${tag}-windows-amd64.exe`, `SpaceSniffer-${tag}-ubuntu-amd64.deb`];
+  const oldData = [oldExecutable, debian];
+  const newData = [executable, debian];
   names.forEach((name, index) => fs.writeFileSync(path.join(root, 'release', name), newData[index]));
-  fs.writeFileSync(path.join(root, 'release/SHA256SUMS.txt'), checksum);
-  const oldAssets = [...names.map((name, i) => asset(name, oldData[i], 11 + i)), asset('SHA256SUMS.txt', oldChecksum, 15)];
-  const newAssets = [...names.map((name, i) => asset(name, newData[i], 21 + i)), asset('SHA256SUMS.txt', checksum, 25)];
+  const oldAssets = names.map((name, i) => asset(name, oldData[i], 11 + i));
+  const newAssets = names.map((name, i) => asset(name, newData[i], 21 + i));
   const lease = {repository: 'siarheisinelnikau/space-sniffer', release_id: 430819184, tag,
     name: `Space Sniffer ${tag}`, target: old, assets: copy(oldAssets)};
   fs.writeFileSync(path.join(root, 'scripts/release-draft-lease.json'), JSON.stringify(lease));
@@ -54,7 +50,7 @@ function fixture(options = {}) {
     git: {
       getRef: async () => options.annotatedTarget || options.tagCycle || options.tagDepth ?
         {data: {object: {type: 'tag', sha: 'd'.repeat(40)}}} :
-        options.tagTarget ? {data: {object: {type: 'commit', sha: options.tagTarget}}} : missing(),
+        options.missingTag ? missing() : {data: {object: {type: 'commit', sha: options.tagTarget || current}}},
       getTag: async ({tag_sha}) => {
         tagDepth++;
         return {data: {object: options.tagCycle ? {type: 'tag', sha: tag_sha} :
@@ -96,12 +92,12 @@ function fixture(options = {}) {
       },
     },
   }};
-  return {root, github, context: {repo: {owner: 'siarheisinelnikau', repo: 'space-sniffer'}, sha: current},
+  return {root, github, context: {repo: {owner: 'siarheisinelnikau', repo: 'space-sniffer'}, sha: current, ref: options.ref || `refs/tags/${tag}`},
     env: {RELEASE_TAG: tag, RELEASE_SHA: current}, core: {setOutput() {}, notice() {}},
     mutations, getDraft: () => draft, newAssets};
 }
 
-test('resumes a known untagged draft by numeric ID and verifies every rebuilt asset', async () => {
+test('resumes a known draft by numeric ID and verifies every rebuilt asset', async () => {
   const state = fixture();
   await publish(state);
   assert.equal(state.getDraft().draft, false);
@@ -136,11 +132,18 @@ test('a failed upload remains a draft and the next run safely resumes by ID', as
   assert.equal(state.getDraft().draft, false);
 });
 
-test('creates and publishes a new complete draft when no release exists', async () => {
+test('publishes only the two platform downloads when no release exists', async () => {
   const state = fixture({none: true});
+  for (const extra of ['SpaceSniffer-v0.6.2.exe', 'space-sniffer_0.6.2_amd64.deb', 'SHA256SUMS.txt']) {
+    fs.writeFileSync(path.join(state.root, 'release', extra), 'unused');
+  }
   await publish(state);
-  assert.equal(state.mutations[0], 'create');
-  assert.equal(state.mutations.at(-1), 'publish');
+  assert.deepEqual(state.mutations, [
+    'create',
+    'upload:SpaceSniffer-v0.6.2-windows-amd64.exe',
+    'upload:SpaceSniffer-v0.6.2-ubuntu-amd64.deb',
+    'publish',
+  ]);
 });
 
 for (const [name, options, expression] of [
@@ -150,6 +153,8 @@ for (const [name, options, expression] of [
   ['different draft target', {changeDraft: draft => { draft.target_commitish = 'c'.repeat(40); }}, /target no longer matches/],
   ['changed draft asset', {changeDraft: draft => { draft.assets[0].digest = 'sha256:' + '0'.repeat(64); }}, /draft asset differs/],
   ['application source changes', {sourceChange: true}, /Only workflow and publisher changes/],
+  ['a branch ref', {ref: 'refs/heads/main'}, /release tag must match/],
+  ['a missing version tag', {missingTag: true}, /version tag no longer exists/],
   ['existing tag for another commit', {tagTarget: 'c'.repeat(40)}, /tags are never moved/],
   ['annotated tag for another commit', {annotatedTarget: 'c'.repeat(40)}, /tags are never moved/],
   ['annotated tag cycle', {tagCycle: true}, /cycle or depth limit/],
@@ -161,26 +166,3 @@ for (const [name, options, expression] of [
     assert.deepEqual(state.mutations, []);
   });
 }
-
-test('refuses changed compatibility bytes even when checksums were recomputed', async () => {
-  const state = fixture({none: true});
-  const file = path.join(state.root, 'release', 'SpaceSniffer-v0.6.1.exe');
-  fs.writeFileSync(file, 'different executable');
-  await assert.rejects(() => publish(state), /Compatibility asset differs/);
-  assert.deepEqual(state.mutations, []);
-});
-
-test('staging emits exact platform names and identical old updater aliases', () => {
-  const {stageRelease} = require('./release-assets.cjs');
-  const state = fixture({none: true});
-  const directory = path.join(state.root, 'release');
-  for (const name of ['SpaceSniffer-v0.6.1.exe', 'space-sniffer_0.6.1_amd64.deb', 'SHA256SUMS.txt']) fs.unlinkSync(path.join(directory, name));
-  stageRelease(directory, 'v0.6.1');
-  stageRelease(directory, 'v0.6.1');
-  for (const [canonical, legacy] of [['SpaceSniffer-v0.6.1-windows-amd64.exe','SpaceSniffer-v0.6.1.exe'], ['SpaceSniffer-v0.6.1-ubuntu-amd64.deb','space-sniffer_0.6.1_amd64.deb']]) {
-    assert.deepEqual(fs.readFileSync(path.join(directory, canonical)), fs.readFileSync(path.join(directory, legacy)));
-  }
-  assert.equal(fs.readFileSync(path.join(directory,'SHA256SUMS.txt'),'utf8').trim().split('\n').length, 4);
-  fs.writeFileSync(path.join(directory, 'SpaceSniffer-v0.6.1.exe'), 'different');
-  assert.throws(() => stageRelease(directory,'v0.6.1'), /Compatibility asset differs/);
-});

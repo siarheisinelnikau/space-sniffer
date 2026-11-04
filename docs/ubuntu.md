@@ -61,7 +61,8 @@ graphics backends. A package built on a newer Ubuntu may require newer libraries
 and is not automatically compatible with 22.04. The CI matrix builds on both
 22.04 and 24.04 and keeps each package in its own Actions artifact. The release
 workflow publishes an amd64 `.deb` built on Ubuntu 22.04 together with the Windows
-executable and a combined SHA256SUMS manifest.
+executable. The updater verifies the SHA-256 digest of each file against GitHub's
+release metadata.
 
 Download the `.deb` from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) for the first installation. Later updates use **Updates → Check for updates → Download and install → Install and restart**. The shared updater verifies the size, SHA-256 and Debian package identity, then opens a polkit authorization prompt and installs through apt on a worker. The current app stays open on cancellation or error and restarts as the normal desktop user after success. Its previous scan root and saved preferences are retained. Source builds and copied executables must be installed through the package first. The package declares apt and polkit dependencies; recovery follows normal apt/dpkg behavior.
 
