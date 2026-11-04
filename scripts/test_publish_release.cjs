@@ -16,22 +16,24 @@ function fixture(options = {}) {
   fs.mkdirSync(path.join(root, 'release'));
   const old = 'a'.repeat(40);
   const current = 'b'.repeat(40);
-  const tag = 'v0.6.0';
-  const notes = '# Space Sniffer v0.6.0\n\n' + 'Verified localization and saved light/dark theme controls. '.repeat(3);
-  fs.writeFileSync(path.join(root, 'Cargo.toml'), '[package]\nversion = "0.6.0"\n');
+  const tag = 'v0.6.1';
+  const notes = '# Space Sniffer v0.6.1\n\n' + 'Verified localization and saved light/dark theme controls. '.repeat(3);
+  fs.writeFileSync(path.join(root, 'Cargo.toml'), '[package]\nversion = "0.6.1"\n');
   fs.writeFileSync(path.join(root, `docs/release-notes/${tag}.md`), notes);
   const asset = (name, data, id) => ({name, size: data.length, digest: sha(data), id});
   const oldExecutable = Buffer.from('Original checked executable fixture');
   const executable = Buffer.from('New checked executable fixture');
-  const debianName = `space-sniffer_${tag.slice(1)}_amd64.deb`;
   const debian = Buffer.from('Checked Debian package fixture');
-  const oldChecksum = Buffer.from(`${sha(oldExecutable).slice(7)}  SpaceSniffer-${tag}.exe\n${sha(debian).slice(7)}  ${debianName}\n`);
-  const checksum = Buffer.from(`${sha(executable).slice(7)}  SpaceSniffer-${tag}.exe\n${sha(debian).slice(7)}  ${debianName}\n`);
-  fs.writeFileSync(path.join(root, 'release', `SpaceSniffer-${tag}.exe`), executable);
+  const names = [`SpaceSniffer-${tag}-windows-amd64.exe`, `SpaceSniffer-${tag}-ubuntu-amd64.deb`, `SpaceSniffer-${tag}.exe`, `space-sniffer_${tag.slice(1)}_amd64.deb`];
+  const oldData = [oldExecutable, debian, oldExecutable, debian];
+  const newData = [executable, debian, executable, debian];
+  const sums = data => Buffer.from(names.map((name, index) => `${sha(data[index]).slice(7)}  ${name}\n`).join(''));
+  const oldChecksum = sums(oldData);
+  const checksum = sums(newData);
+  names.forEach((name, index) => fs.writeFileSync(path.join(root, 'release', name), newData[index]));
   fs.writeFileSync(path.join(root, 'release/SHA256SUMS.txt'), checksum);
-  fs.writeFileSync(path.join(root, 'release', debianName), debian);
-  const oldAssets = [asset(`SpaceSniffer-${tag}.exe`, oldExecutable, 11), asset('SHA256SUMS.txt', oldChecksum, 12), asset(debianName, debian, 13)];
-  const newAssets = [asset(`SpaceSniffer-${tag}.exe`, executable, 21), asset('SHA256SUMS.txt', checksum, 22), asset(debianName, debian, 23)];
+  const oldAssets = [...names.map((name, i) => asset(name, oldData[i], 11 + i)), asset('SHA256SUMS.txt', oldChecksum, 15)];
+  const newAssets = [...names.map((name, i) => asset(name, newData[i], 21 + i)), asset('SHA256SUMS.txt', checksum, 25)];
   const lease = {repository: 'siarheisinelnikau/space-sniffer', release_id: 430819184, tag,
     name: `Space Sniffer ${tag}`, target: old, assets: copy(oldAssets)};
   fs.writeFileSync(path.join(root, 'scripts/release-draft-lease.json'), JSON.stringify(lease));
@@ -159,3 +161,26 @@ for (const [name, options, expression] of [
     assert.deepEqual(state.mutations, []);
   });
 }
+
+test('refuses changed compatibility bytes even when checksums were recomputed', async () => {
+  const state = fixture({none: true});
+  const file = path.join(state.root, 'release', 'SpaceSniffer-v0.6.1.exe');
+  fs.writeFileSync(file, 'different executable');
+  await assert.rejects(() => publish(state), /Compatibility asset differs/);
+  assert.deepEqual(state.mutations, []);
+});
+
+test('staging emits exact platform names and identical old updater aliases', () => {
+  const {stageRelease} = require('./release-assets.cjs');
+  const state = fixture({none: true});
+  const directory = path.join(state.root, 'release');
+  for (const name of ['SpaceSniffer-v0.6.1.exe', 'space-sniffer_0.6.1_amd64.deb', 'SHA256SUMS.txt']) fs.unlinkSync(path.join(directory, name));
+  stageRelease(directory, 'v0.6.1');
+  stageRelease(directory, 'v0.6.1');
+  for (const [canonical, legacy] of [['SpaceSniffer-v0.6.1-windows-amd64.exe','SpaceSniffer-v0.6.1.exe'], ['SpaceSniffer-v0.6.1-ubuntu-amd64.deb','space-sniffer_0.6.1_amd64.deb']]) {
+    assert.deepEqual(fs.readFileSync(path.join(directory, canonical)), fs.readFileSync(path.join(directory, legacy)));
+  }
+  assert.equal(fs.readFileSync(path.join(directory,'SHA256SUMS.txt'),'utf8').trim().split('\n').length, 4);
+  fs.writeFileSync(path.join(directory, 'SpaceSniffer-v0.6.1.exe'), 'different');
+  assert.throws(() => stageRelease(directory,'v0.6.1'), /Compatibility asset differs/);
+});

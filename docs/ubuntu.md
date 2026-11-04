@@ -28,7 +28,7 @@ the `space-sniffer` checkout:
 
 ```sh
 git clone https://github.com/siarheisinelnikau/rust-auto-updator.git
-git -C rust-auto-updator checkout 78e10609c97b27bf1220855b9a573f348590b095
+git -C rust-auto-updator checkout b26501feda713389b64944ca3bc048aa35699cf9
 cd space-sniffer
 cargo build --locked --release
 ./target/release/space-sniffer
@@ -45,7 +45,7 @@ CI package or provide a newer Python; CI installs Python 3.13 explicitly.
 
 ```sh
 python3 scripts/package_linux.py
-sudo apt install ./target/debian/space-sniffer_0.6.0_amd64.deb
+sudo apt install ./target/debian/SpaceSniffer-v0.6.1-ubuntu-amd64.deb
 ```
 
 The script takes `--binary` and `--output` overrides, accepts amd64/arm64 Linux

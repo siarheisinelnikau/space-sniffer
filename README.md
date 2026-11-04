@@ -88,7 +88,7 @@ Install Rust and Xcode Command Line Tools (`xcode-select --install`), then run f
 cargo run --locked --release -- "$HOME"
 ```
 
-Download and run the standalone Windows executable from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). New releases use **SpaceSniffer-vVERSION.exe**, such as `SpaceSniffer-v0.6.0.exe`; earlier releases used `space-sniffer.exe`. The file needs no installation or extraction. Releases contain one Windows x86-64 executable, so its name has no architecture suffix. For Ubuntu x86-64, download **space-sniffer_VERSION_amd64.deb** and install it with `sudo apt install ./space-sniffer_0.6.0_amd64.deb`. This adds the application-menu launcher. Packages are built on Ubuntu 22.04; macOS remains a source build. Publishing retains existing releases and assets. See the [release naming and publishing rules](CONTRIBUTING.md#releases).
+Download and run the standalone Windows executable from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). New releases use **SpaceSniffer-vVERSION-windows-amd64.exe**, such as `SpaceSniffer-v0.6.1-windows-amd64.exe`. The file needs no installation or extraction. For Ubuntu x86-64, download **SpaceSniffer-vVERSION-ubuntu-amd64.deb** and install it with `sudo apt install ./SpaceSniffer-v0.6.1-ubuntu-amd64.deb`. This adds the application-menu launcher. Packages are built on Ubuntu 22.04; macOS remains a source build. Publishing retains existing releases and assets. See the [release naming and publishing rules](CONTRIBUTING.md#releases).
 
 ## Language and appearance
 
@@ -111,6 +111,8 @@ On Ubuntu x86-64, install the `.deb` once, then use the same **Download and inst
 An interrupted download or checksum mismatch leaves the installed application unchanged. Temporary downloads are removed when discarded or the app closes. Releases without a SHA-256 digest or the expected platform asset can be opened on GitHub for manual updating. macOS and other architectures support release checks and the release-page link.
 
 Release discovery, download verification and replacement are provided by the shared `rust-auto-updator` core. The updater is built into the application; no separate updater installation is required. Windows keeps a recovery copy in a private `.space-sniffer-update-*` folder beside the app and cleans it after the new native host presents its first frame; it accepts both versioned assets and the legacy `space-sniffer.exe` name. Ubuntu stages its verified `.deb` and restart helper in a private temporary directory, then cleans that directory after restart. The shared core is MIT licensed; its notice is included in `licenses/rust-auto-updator.txt`.
+
+New updaters prefer filenames containing both platform and architecture, then try platform-only, architecture-only and historical names. Exact matching prevents selecting another platform. Releases also retain byte-identical copies named `SpaceSniffer-vVERSION.exe` and `space-sniffer_VERSION_amd64.deb` so previously installed updaters can still find updates. Those compatibility copies contain the same application; choose the explicit `windows-amd64` or `ubuntu-amd64` file for manual downloads.
 
 ![Space Sniffer Updates settings showing the installed version, startup-check preference, and manual update check](docs/updates.png)
 
