@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: ['release/v0.6.4']
 
 permissions:
   contents: read
@@ -13,6 +13,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_SOURCE_SHA: '80fee2ddc819f85c09e74a163768547f886945d0'
 
 jobs:
   build:
@@ -24,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.RELEASE_SOURCE_SHA }}
       - name: Provision shared updater source
         shell: pwsh
         run: ./scripts/provision-shared-updater.ps1
@@ -40,7 +41,7 @@ jobs:
         run: |
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object name -eq 'space-sniffer').version
-          $releaseTag = $env:RELEASE_REF
+          $releaseTag = $env:RELEASE_REF -replace '^release/', ''
           if ($releaseTag -ne "v$version") {
             throw "Release ref $env:RELEASE_REF must match package version v$version for in-app updates."
           }
@@ -84,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.RELEASE_SOURCE_SHA }}
       - name: Provision shared updater source
         shell: pwsh
         run: ./scripts/provision-shared-updater.ps1
@@ -108,14 +109,15 @@ jobs:
           RELEASE_REF: ${{ github.ref_name }}
         run: |
           python3 - <<'PYCODE'
-          import os, tomllib
+          import os, subprocess, tomllib
           from pathlib import Path
           version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
-          tag = os.environ['RELEASE_REF']
+          tag = os.environ['RELEASE_REF'].removeprefix('release/')
           assert tag == f'v{version}', 'Release ref must match Cargo version'
           assert Path(f'docs/release-notes/{tag}.md').stat().st_size > 100
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f"release_sha={os.environ['GITHUB_SHA']}\n")
+              commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+              output.write(f"release_sha={commit}\n")
           PYCODE
       - name: Test and lint
         run: |
@@ -164,7 +166,7 @@ jobs:
         env:
           WINDOWS_SHA: ${{ needs.build.outputs.release_sha }}
           UBUNTU_SHA: ${{ needs.ubuntu.outputs.release_sha }}
-        run: test "$WINDOWS_SHA" = "$UBUNTU_SHA"
+        run: test "$WINDOWS_SHA" = "$UBUNTU_SHA" && test "$WINDOWS_SHA" = "$RELEASE_SOURCE_SHA"
       - name: Resume only the owned draft and publish verified assets
         uses: actions/github-script@v7
         env:
@@ -173,4 +175,20 @@ jobs:
         with:
           script: |
             const publish = require('./scripts/publish_release.cjs');
-            await publish({github, context, core});
+            const tag = process.env.RELEASE_TAG;
+            const sha = process.env.RELEASE_SHA;
+            const repo = context.repo;
+            if (context.eventName !== 'push' || context.ref !== 'refs/heads/release/v0.6.4' ||
+                repo.owner !== 'siarheisinelnikau' || repo.repo !== 'space-sniffer' ||
+                tag !== 'v0.6.4' || sha !== process.env.RELEASE_SOURCE_SHA ||
+                require('node:child_process').execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim() !== sha) {
+              throw new Error('The authorized release ref and checked commit must match.');
+            }
+            const ref = `tags/${tag}`;
+            try {
+              await github.rest.git.getRef({...repo, ref});
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.git.createRef({...repo, ref: `refs/${ref}`, sha});
+            }
+            await publish({github, context: {repo, ref: `refs/${ref}`, sha}, core});
