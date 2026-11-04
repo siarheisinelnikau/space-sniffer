@@ -117,7 +117,7 @@ jobs:
           assert Path(f'docs/release-notes/{tag}.md').stat().st_size > 100
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-            output.write(f"release_sha={commit}\n")
+              output.write(f"release_sha={commit}\n")
           PYCODE
       - name: Test and lint
         run: |
