@@ -6,9 +6,9 @@ A native, live disk usage explorer written in Rust with [egui](https://github.co
 
 [Download Windows .exe / Ubuntu .deb](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Ubuntu build and install](docs/ubuntu.md) · [Performance notes](docs/performance.md)
 
-![Space Sniffer on Windows: compact sidebar and live nested disk usage map](docs/screenshot.png)
+![Space Sniffer on Ubuntu with dark-blue folders, purple EXE files, and gray-blue files](docs/screenshot.png)
 
-Space Sniffer 0.5.0 on Windows, rendered by the application with an isolated sample folder. Language and theme controls are available at the top of the sidebar.
+Space Sniffer 0.6.3 on Ubuntu, rendered by the application with an isolated sample folder. The key above the map identifies the three colors.
 
 This is an independent implementation inspired by [SpaceSniffer by Uderzo Software](https://www.uderzo.it/main_products/space_sniffer/). It is not affiliated with Uderzo Software and does not use the original application's source code or assets.
 
@@ -19,7 +19,7 @@ The Windows executable now embeds the treemap application mark at 16, 20, 24, 32
 - Parallel background scanning with progress and cancellation, using up to eight directory workers.
 - A growing, interactive map during the first scan, without waiting for the whole drive to finish.
 - Automatic filesystem watching, incremental file updates, and recovery after missed events.
-- A squarified treemap with nested folders, file type colors, adjustable depth, and a Classic palette.
+- A squarified treemap with nested folders, three color categories, adjustable depth, and a Classic palette.
 - Folder zoom, breadcrumbs, back/forward navigation, and a selection inspector with the largest child entries.
 - Filename and size filters, path copying, and opening an entry in the system file manager.
 - CSV export of the current subtree, with original and filtered byte counts.
@@ -143,6 +143,8 @@ Large filters show **Filtering** progress while the previous filter stays visibl
 | **Depth** | Show 1–6 nested levels |
 | **Classic** | Switch the treemap palette |
 | **Copy path** / **Reveal** | Copy the selection's path / open the system file manager |
+
+The key above the map shows three colors. In the default palette, folders are dark blue, `.exe` files are purple, and all other files are gray-blue. **Classic** uses the same categories with different colors. With **Color by volume** enabled, use **Volumes in view** for the color key.
 
 Zero-byte entries are available in the list but have no treemap area. During scanning, the inspector lists up to 100 discovered children; after completion it lists up to 100 of the largest children.
 

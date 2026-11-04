@@ -294,6 +294,8 @@ messages! {
     ("Volume information unavailable", "Информация о томе недоступна", "Informations du volume indisponibles", "Volume-Informationen nicht verfügbar", "Información del volumen no disponible", "Informazioni sul volume non disponibili"),
     ("Folder totals may include other volumes.", "Размер папки может включать другие тома.", "Le total du dossier peut inclure d’autres volumes.", "Ordnersummen können andere Volumes enthalten.", "El total de la carpeta puede incluir otros volúmenes.", "Il totale della cartella può includere altri volumi."),
     ("Classic colors", "Классические цвета", "Couleurs classiques", "Klassische Farben", "Colores clásicos", "Colori classici"),
+    ("Folders", "Папки", "Dossiers", "Ordner", "Carpetas", "Cartelle"),
+    ("Other files", "Остальные файлы", "Autres fichiers", "Andere Dateien", "Otros archivos", "Altri file"),
     ("Discovered entries", "Найденные элементы", "Éléments découverts", "Gefundene Einträge", "Elementos descubiertos", "Elementi rilevati"),
     ("Largest entries", "Крупнейшие элементы", "Éléments les plus volumineux", "Größte Einträge", "Elementos más grandes", "Elementi più grandi"),
     ("Export CSV", "Экспорт CSV", "Exporter en CSV", "CSV exportieren", "Exportar CSV", "Esporta CSV"),
