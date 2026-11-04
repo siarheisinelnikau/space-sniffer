@@ -1,6 +1,6 @@
 # Fetch the exact public source revision required by the sibling path dependency.
 $ErrorActionPreference = 'Stop'
-$revision = 'b26501feda713389b64944ca3bc048aa35699cf9'
+$revision = '093e937cae174e0ec57c4485d8ce3b36d90e11f8'
 if (-not $env:GITHUB_WORKSPACE -or -not $env:RUNNER_TEMP) {
     throw 'This provisioning script runs inside GitHub Actions.'
 }
