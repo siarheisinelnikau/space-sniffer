@@ -1430,11 +1430,12 @@ impl App {
     fn file_legend(&self, ui: &mut egui::Ui) {
         let language = self.preferences.language;
         let colors = MAP_PALETTES[usize::from(self.classic)];
+        let application_formats = APP_SUFFIXES.join(" · ");
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             for (color, label) in [
                 (colors.folder, language.text("Folders")),
-                (colors.exe, ".exe"),
+                (colors.application, application_formats.as_str()),
                 (colors.file, language.text("Other files")),
             ] {
                 ui.horizontal(|ui| {
@@ -1942,34 +1943,41 @@ fn volume_color(index: usize) -> Color32 {
 #[derive(Clone, Copy)]
 struct MapPalette {
     folder: Color32,
-    exe: Color32,
+    application: Color32,
     file: Color32,
 }
+
+const APP_SUFFIXES: &[&str] = if cfg!(target_os = "linux") {
+    &[".deb", ".AppImage", ".snap", ".flatpak"]
+} else {
+    &[".exe"]
+};
 
 const MAP_PALETTES: [MapPalette; 2] = [
     MapPalette {
         folder: Color32::from_rgb(42, 55, 75),
-        exe: Color32::from_rgb(113, 94, 157),
+        application: Color32::from_rgb(113, 94, 157),
         file: Color32::from_rgb(76, 99, 128),
     },
     MapPalette {
         folder: Color32::from_rgb(145, 108, 70),
-        exe: Color32::from_rgb(81, 128, 169),
+        application: Color32::from_rgb(81, 128, 169),
         file: Color32::from_rgb(174, 133, 88),
     },
 ];
 
 fn tile_colors(node: &Node) -> [Color32; 2] {
-    let is_exe = node.kind == EntryKind::File
-        && node
-            .path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
+    let is_application = node.kind == EntryKind::File
+        && node.path.extension().is_some_and(|extension| {
+            APP_SUFFIXES
+                .iter()
+                .any(|suffix| extension.eq_ignore_ascii_case(&suffix[1..]))
+        });
     MAP_PALETTES.map(|palette| {
         if node.is_dir() {
             palette.folder
-        } else if is_exe {
-            palette.exe
+        } else if is_application {
+            palette.application
         } else {
             palette.file
         }
@@ -1981,22 +1989,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_palette_distinguishes_folders_exes_and_other_files() {
+    fn file_palette_uses_application_formats_for_the_current_platform() {
         let tree = tree(0);
         let mut folder = tree.nodes[1].clone();
-        folder.path.set_file_name("folder.exe");
+        folder
+            .path
+            .set_file_name(format!("folder{}", APP_SUFFIXES[0]));
         assert_eq!(
             tile_colors(&folder),
             MAP_PALETTES.map(|palette| palette.folder)
         );
 
         let mut file = tree.nodes[2].clone();
-        for name in ["archive.zip", "library.so", "notes.txt", "no-extension"] {
+        let (application_files, foreign_format): (&[&str], &str) = if cfg!(target_os = "linux") {
+            (
+                &[
+                    "setup.DEB",
+                    "viewer.AppImage",
+                    "browser.snap",
+                    "editor.flatpak",
+                ],
+                "setup.exe",
+            )
+        } else {
+            (&["setup.EXE"], "package.deb")
+        };
+        for name in ["archive.zip", "library.so", "no-extension", foreign_format] {
             file.path.set_file_name(name);
             assert_eq!(tile_colors(&file), MAP_PALETTES.map(|palette| palette.file));
         }
-        file.path.set_file_name("setup.EXE");
-        assert_eq!(tile_colors(&file), MAP_PALETTES.map(|palette| palette.exe));
+        for name in application_files {
+            file.path.set_file_name(name);
+            assert_eq!(
+                tile_colors(&file),
+                MAP_PALETTES.map(|palette| palette.application)
+            );
+        }
     }
 
     #[test]
