@@ -4,6 +4,7 @@
 use crate::{
     live_tree::{LiveTree, path_key},
     model::{EntryKind, Node, ScanTree},
+    scan_scope::ScanScope,
     scanner::{self, ScanProgress},
 };
 use notify::{
@@ -261,6 +262,8 @@ struct Worker {
     raw_receiver: Receiver<notify::Result<Event>>,
     overflow: Arc<AtomicBool>,
     watchers: Vec<RecommendedWatcher>,
+    scope: Arc<ScanScope>,
+    watch_frontiers: HashSet<PathBuf>,
     native: bool,
     initialized: bool,
     initial_failure_sent: bool,
@@ -279,6 +282,7 @@ impl Worker {
         let root = watch_root(path);
         let (raw_sender, raw_receiver) = mpsc::sync_channel(RAW_CAPACITY);
         Self {
+            scope: Arc::new(ScanScope::new(&root)),
             root_key: path_key(&root),
             root,
             sink,
@@ -286,6 +290,7 @@ impl Worker {
             raw_receiver,
             overflow: Arc::new(AtomicBool::new(false)),
             watchers: Vec::new(),
+            watch_frontiers: HashSet::new(),
             native: false,
             initialized: false,
             initial_failure_sent: false,
@@ -330,8 +335,13 @@ impl Worker {
         // Rebuild after a root replacement/error so stale native handles do
         // not remain attached to a deleted inode. Setup always precedes scan.
         self.watchers.clear();
+        self.watch_frontiers.clear();
         self.native = false;
         self.last_retry = Instant::now();
+        if let Err(error) = self.scope.validate(&self.root) {
+            self.status(false, error);
+            return;
+        }
         let root_directory = fs::symlink_metadata(&self.root)
             .is_ok_and(|metadata| metadata.is_dir() && !is_link(&metadata));
         let mut installed = false;
@@ -369,8 +379,15 @@ impl Worker {
         if root_directory {
             match self.make_watcher(false, true) {
                 Ok(mut root_watcher) => {
-                    match root_watcher.watch(&self.root, RecursiveMode::Recursive) {
-                        Ok(()) => installed = true,
+                    match watch_directory(
+                        &mut root_watcher,
+                        &self.scope,
+                        &self.root,
+                        &self.sink.cancel,
+                        &mut self.watch_frontiers,
+                    ) {
+                        Ok(true) => installed = true,
+                        Ok(false) => failure = Some("Selected directory cannot be watched".into()),
                         Err(error) => failure = Some(error.to_string()),
                     }
                     self.watchers.push(root_watcher);
@@ -394,6 +411,7 @@ impl Worker {
         let sender = self.raw_sender.clone();
         let overflow = Arc::clone(&self.overflow);
         let root_key = self.root_key.clone();
+        let scope = Arc::clone(&self.scope);
         let cancel = Arc::clone(&self.sink.cancel);
         RecommendedWatcher::new(
             move |result: notify::Result<Event>| {
@@ -425,7 +443,8 @@ impl Worker {
                         && !event.paths.is_empty()
                         && !event.paths.iter().any(|path| {
                             let key = path_key(path);
-                            key.starts_with(&root_key) || root_key.starts_with(&key)
+                            (key.starts_with(&root_key) || root_key.starts_with(&key))
+                                && scope.allows(path)
                         })
                     {
                         return;
@@ -529,6 +548,9 @@ impl Worker {
                 );
                 for path in event.paths {
                     let key = path_key(&path);
+                    if !self.scope.allows(&path) {
+                        continue;
+                    }
                     if key.starts_with(&self.root_key) {
                         self.pending.add_event(path, recursive, structural);
                     } else if self.root_key.starts_with(&key) {
@@ -550,13 +572,25 @@ impl Worker {
             sink.try_event(LiveEvent::Progress(progress));
         };
         let result = if self.initialized {
-            scanner::scan_with_progress(&self.root, &self.sink.cancel, report)
+            scanner::scan_scoped::<false>(
+                &self.root,
+                &self.sink.cancel,
+                &self.scope,
+                report,
+                |_| {},
+            )
         } else {
             self.status(false, "Scanning · the map fills as files are found".into());
             let mut previews = PreviewPublisher::default();
-            scanner::scan_with_observer(&self.root, &self.sink.cancel, report, |tree| {
-                previews.publish(tree, &sink);
-            })
+            scanner::scan_scoped::<true>(
+                &self.root,
+                &self.sink.cancel,
+                &self.scope,
+                report,
+                |tree| {
+                    previews.publish(tree, &sink);
+                },
+            )
         };
         match result {
             Ok(tree) => {
@@ -652,7 +686,28 @@ impl Worker {
                 // final kind while the old native handle watches a dead inode.
                 self.install_watch();
             }
-            match inspect_change(&self.root, &path, recursive, &self.sink.cancel) {
+            let mut watch_error = None;
+            let watcher = self.watchers.last_mut();
+            let frontiers = &mut self.watch_frontiers;
+            let scope = &self.scope;
+            let cancel = &self.sink.cancel;
+            let result = inspect_change(&self.root, &path, recursive, cancel, scope, |directory| {
+                // Attach after ancestor/link validation but before scanning,
+                // so changes during discovery cannot fall into a watch gap.
+                if directory
+                    .parent()
+                    .is_some_and(|parent| frontiers.contains(parent))
+                    && let Some(watcher) = watcher
+                {
+                    watch_error =
+                        watch_directory(watcher, scope, directory, cancel, frontiers).err();
+                }
+            });
+            if let Some(error) = watch_error {
+                self.native = false;
+                self.status(false, format!("Watcher error ({error}) · polling every 2s"));
+            }
+            match result {
                 Ok(Some(change)) => {
                     let covering = match &change {
                         Change::Remove(path) | Change::ReplaceSubtree { path, .. } => {
@@ -685,6 +740,76 @@ impl Worker {
             self.watching_status();
         }
     }
+}
+
+// Split watches at excluded mounts and unreadable descendants. A single
+// permission error must not turn a readable whole disk into a polling loop.
+fn watch_directory(
+    watcher: &mut impl Watcher,
+    scope: &ScanScope,
+    root: &Path,
+    cancel: &AtomicBool,
+    frontiers: &mut HashSet<PathBuf>,
+) -> notify::Result<bool> {
+    let mut root_watched = false;
+    let mut pending = vec![root.to_owned()];
+    while let Some(path) = pending.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if !scope.allows(&path) {
+            continue;
+        }
+        if !scope.partitioned(&path) && !frontiers.contains(&path) {
+            match watcher.watch(&path, RecursiveMode::Recursive) {
+                Ok(()) => {
+                    root_watched |= path == root;
+                    continue;
+                }
+                Err(error) if inaccessible_watch(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        // Recursive registration may have stopped at a restricted descendant.
+        // Watch this directory and retry its children independently. Existing
+        // watches are reused by notify; readable siblings keep live updates.
+        match watcher.watch(&path, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                root_watched |= path == root;
+            }
+            Err(error) if inaccessible_watch(&error) => continue,
+            Err(error) => return Err(error),
+        }
+        frontiers.insert(path.clone());
+        let entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied
+                        | std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(notify::Error::io(error)),
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if scope.allows(&child) && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(child);
+            }
+        }
+    }
+    Ok(root_watched)
+}
+
+fn inaccessible_watch(error: &notify::Error) -> bool {
+    matches!(error.kind, notify::ErrorKind::PathNotFound)
+        || matches!(&error.kind, notify::ErrorKind::Io(error)
+            if matches!(error.kind(), std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory))
 }
 
 fn ignored(event: &Event) -> bool {
@@ -758,9 +883,11 @@ fn inspect_change(
     path: &Path,
     recursive: bool,
     cancel: &AtomicBool,
+    scope: &ScanScope,
+    before_scan: impl FnOnce(&Path),
 ) -> Result<Option<Change>, String> {
     let root_key = path_key(root);
-    if !path_key(path).starts_with(&root_key) {
+    if !scope.allows(path) || !path_key(path).starts_with(&root_key) {
         return Ok(None);
     }
     let mut ancestors: Vec<_> = path
@@ -797,7 +924,8 @@ fn inspect_change(
     };
     let kind = entry_kind(&metadata);
     if kind == EntryKind::Directory && recursive {
-        return match scanner::scan_path(path, cancel) {
+        before_scan(path);
+        return match scanner::scan_scoped::<false>(path, cancel, scope, |_| {}, |_| {}) {
             Ok(tree) => Ok(Some(Change::ReplaceSubtree {
                 path: path.to_owned(),
                 tree,
@@ -1010,6 +1138,116 @@ mod tests {
         assert_eq!(model.tree.total_size(), 21);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn partitioned_native_watch_omits_virtual_mounts_and_tracks_new_directories() {
+        let directory = Directory::new();
+        let excluded = directory.0.join("virtual");
+        fs::create_dir(&excluded).unwrap();
+        let excluded_file = excluded.join("kcore");
+        fs::write(&excluded_file, [0; 100]).unwrap();
+        let (mut worker, receiver) = worker(&directory.0);
+        worker.scope = Arc::new(ScanScope::excluding([excluded.clone()]));
+        worker.install_watch();
+        assert!(worker.native);
+        let mut model = initial(&mut worker, &receiver);
+        assert!(model.find(&excluded).is_none());
+        assert!(
+            inspect_change(
+                &directory.0,
+                &excluded_file,
+                true,
+                &worker.sink.cancel,
+                &worker.scope,
+                |_| {}
+            )
+            .unwrap()
+            .is_none()
+        );
+        fs::write(&excluded_file, [0; 200]).unwrap();
+        // Neither the recursive backend nor the callback may watch this file.
+        assert!(
+            worker
+                .raw_receiver
+                .recv_timeout(Duration::from_millis(200))
+                .is_err()
+        );
+        let new_dir = directory.0.join("created");
+        fs::create_dir(&new_dir).unwrap();
+        let file = new_dir.join("data");
+        for size in [11, 23] {
+            fs::write(&file, vec![0; size]).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while model.tree.total_size() != size as u64 && Instant::now() < deadline {
+                if let Ok(event) = worker.raw_receiver.recv_timeout(Duration::from_millis(30)) {
+                    worker.collect(event);
+                }
+                if worker.pending.ready(Instant::now()) {
+                    worker.process_pending();
+                }
+                for event in receiver.try_iter() {
+                    if let LiveEvent::Changes(changes) = event {
+                        model.apply(&changes);
+                    }
+                }
+            }
+            assert_eq!(model.tree.total_size(), size as u64);
+            assert!(model.find(&excluded).is_none());
+        }
+        // Whole-root recovery uses the original scope as well.
+        worker.pending.force_resync();
+        worker.process_pending();
+        for event in receiver.try_iter() {
+            if let LiveEvent::Changes(changes) = event {
+                model.apply(&changes);
+            }
+        }
+        assert_eq!(model.tree.total_size(), 23);
+        assert!(model.find(&excluded).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreadable_descendant_does_not_disable_native_watching_for_readable_siblings() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = Directory::new();
+        let restricted = directory.0.join("restricted");
+        fs::create_dir(&restricted).unwrap();
+        fs::write(restricted.join("hidden"), [0; 50]).unwrap();
+        let readable = directory.0.join("file");
+        fs::write(&readable, [0; 7]).unwrap();
+        fs::set_permissions(&restricted, fs::Permissions::from_mode(0o0)).unwrap();
+        let permission_denied = fs::read_dir(&restricted).is_err();
+        let (mut worker, receiver) = worker(&directory.0);
+        worker.install_watch();
+        // Restore access before any assertion so cleanup also works on failure.
+        let native = worker.native;
+        let frontier = worker.watch_frontiers.contains(&directory.0);
+        fs::set_permissions(&restricted, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(native);
+        if permission_denied {
+            assert!(frontier);
+        }
+        let mut model = initial(&mut worker, &receiver);
+        fs::write(&readable, [0; 19]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while model.tree.total_size() != 69 && Instant::now() < deadline {
+            if let Ok(event) = worker.raw_receiver.recv_timeout(Duration::from_millis(30)) {
+                worker.collect(event);
+            }
+            if worker.pending.ready(Instant::now()) {
+                worker.process_pending();
+            }
+            for event in receiver.try_iter() {
+                if let LiveEvent::Changes(changes) = event {
+                    model.apply(&changes);
+                }
+            }
+        }
+        assert_eq!(model.tree.total_size(), 69);
+        assert!(worker.native);
+    }
+
     #[test]
     fn full_output_queue_can_be_cancelled_and_successful_events_wake() {
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -1143,6 +1381,8 @@ mod tests {
             &link.join("deep/absent.txt"),
             true,
             &AtomicBool::new(false),
+            &ScanScope::new(&directory.0),
+            |_| {},
         )
         .unwrap();
         assert!(

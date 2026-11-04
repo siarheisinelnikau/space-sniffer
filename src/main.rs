@@ -79,6 +79,7 @@ fn run_gpu(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Space Sniffer")
+            .with_app_id("space-sniffer")
             .with_inner_size([1280.0, 760.0])
             .with_min_inner_size([800.0, 520.0])
             .with_icon(app_icon()),

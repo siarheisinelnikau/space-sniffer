@@ -1,10 +1,10 @@
 # Space Sniffer
 
-**FREE and open source for Windows.** No license fee. Released under the [MIT license](LICENSE).
+**FREE and open source for Windows and Ubuntu.** No license fee. Released under the [MIT license](LICENSE).
 
-A native, live disk usage explorer written in Rust with [egui](https://github.com/emilk/egui). Windows renders the interface on the CPU and presents it through GDI, without creating an OpenGL or DirectX context. Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
+A native, live disk usage explorer written in Rust with [egui](https://github.com/emilk/egui). One Cargo project shares the scanner, live model, filters, treemap, and interface across platforms. Windows renders the interface on the CPU and presents it through GDI, without creating an OpenGL or DirectX context. Choose any drive, folder, or accessible network path: the treemap starts filling during the initial scan, then updates automatically as files change. A compact left sidebar keeps controls and selection details beside the map.
 
-[Download Windows .exe](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Performance notes](docs/performance.md)
+[Download Windows .exe / Ubuntu .deb](https://github.com/siarheisinelnikau/space-sniffer/releases/latest) · [Ubuntu build and install](docs/ubuntu.md) · [Performance notes](docs/performance.md)
 
 ![Space Sniffer on Windows: compact sidebar and live nested disk usage map](docs/screenshot.png)
 
@@ -23,9 +23,10 @@ The Windows executable now embeds the treemap application mark at 16, 20, 24, 32
 - Folder zoom, breadcrumbs, back/forward navigation, and a selection inspector with the largest child entries.
 - Filename and size filters, path copying, and opening an entry in the system file manager.
 - CSV export of the current subtree, with original and filtered byte counts.
-- Drive shortcuts, a root path field, and an empty start screen until you choose a location.
+- Drive shortcuts, including mounted Linux filesystems, a root path field, and an empty start screen until you choose a location.
+- Optional volume colors, a map legend, and volume details in the inspector and tooltips.
 - A command-line scan summary without opening a window.
-- Background GitHub update checks, release notes, and verified in-app updates for Windows x86-64.
+- Background GitHub update checks, release notes, and verified in-app updates for Windows and Ubuntu x86-64.
 - Live interface language switching between English, Russian, French, German, Spanish, and Italian.
 - Persistent light and dark themes, with a direct switch in the sidebar.
 
@@ -33,11 +34,11 @@ Large-tree work is measured separately from disk I/O: million-entry filtering ru
 
 Scanning reads filesystem metadata. The app has no file deletion feature or telemetry. Export writes the report you choose to save. Update checks contact GitHub; downloading and replacing the application require your action.
 
-**Platform status:** Windows is the supported desktop platform and the only official binary download. All platforms share the same codebase on `main`. Linux and macOS have automated build/test checks, but their desktop behavior has not been verified by the maintainer; macOS support remains experimental.
+**Platform status:** Windows and Ubuntu use the same application and codebase. Ubuntu has mount discovery, a desktop launcher, `.deb` packaging, and X11 GUI smoke checks; see the [Ubuntu guide](docs/ubuntu.md) for prerequisites and verification limits. Releases include a Windows executable and an Ubuntu amd64 package built on Ubuntu 22.04. macOS remains experimental.
 
 ## Build and run
 
-Install [Rust](https://www.rust-lang.org/tools/install) **1.95 or newer** with Cargo. The repository includes `Cargo.lock`; use `--locked` for reproducible dependency selection. Keep the shared `rust-auto-updator` repository beside this checkout: Cargo resolves `../rust-auto-updator/crates/rust-auto-updator`. CI and release runners must provision that source before Cargo runs; this local extraction does not assume an unpublished remote URL.
+Install [Rust](https://www.rust-lang.org/tools/install) **1.95 or newer** with Cargo. The repository includes `Cargo.lock`; use `--locked` for reproducible dependency selection. Keep the shared `rust-auto-updator` repository beside this checkout: Cargo resolves `../rust-auto-updator/crates/rust-auto-updator`. CI and release runners provision the pinned source revision with `scripts/provision-shared-updater.ps1`; see the [Ubuntu guide](docs/ubuntu.md) for the equivalent local checkout.
 
 ### Windows
 
@@ -60,7 +61,9 @@ cargo build --locked --release
 .\target\release\space-sniffer.exe
 ```
 
-### Linux
+### Ubuntu / Linux
+
+See the [Ubuntu guide](docs/ubuntu.md) for installing a `.deb`, desktop integration, volume colors, and reproducible GUI checks.
 
 For Debian/Ubuntu, install a C/C++ toolchain and the graphics development packages used by eframe's X11/Wayland backends:
 
@@ -85,7 +88,7 @@ Install Rust and Xcode Command Line Tools (`xcode-select --install`), then run f
 cargo run --locked --release -- "$HOME"
 ```
 
-Download and run the standalone Windows executable from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). New releases use **SpaceSniffer-vVERSION.exe**, such as `SpaceSniffer-v0.5.0.exe`; earlier releases used `space-sniffer.exe`. The file needs no installation or extraction. Releases contain one Windows x86-64 executable, so its name has no architecture suffix. Linux and macOS can be built from source. Publishing retains existing releases and assets. See the [release naming and publishing rules](CONTRIBUTING.md#releases).
+Download and run the standalone Windows executable from [GitHub Releases](https://github.com/siarheisinelnikau/space-sniffer/releases/latest). New releases use **SpaceSniffer-vVERSION.exe**, such as `SpaceSniffer-v0.6.0.exe`; earlier releases used `space-sniffer.exe`. The file needs no installation or extraction. Releases contain one Windows x86-64 executable, so its name has no architecture suffix. For Ubuntu x86-64, download **space-sniffer_VERSION_amd64.deb** and install it with `sudo apt install ./space-sniffer_0.6.0_amd64.deb`. This adds the application-menu launcher. Packages are built on Ubuntu 22.04; macOS remains a source build. Publishing retains existing releases and assets. See the [release naming and publishing rules](CONTRIBUTING.md#releases).
 
 ## Language and appearance
 
@@ -103,9 +106,11 @@ The GUI checks the latest stable GitHub release once at startup, without blockin
 
 On Windows x86-64, choose **Download and install**. The download runs in the background, shows progress, and can be cancelled. The shared updater checks the exact size, SHA256SUMS manifest when supplied, GitHub's SHA-256 digest when supplied, and the Windows executable structure before offering **Install and restart**. Installation hands off to the verified new executable as a helper. It waits for this process to exit, replaces the executable at its existing path with a backup, then restarts the app and scans the current root again. The startup-check setting is stored per user and survives executable replacement; scanned files are not changed. Keep the executable in a folder you can write to; no administrator prompt is used. If preparing the helper fails, the app keeps running and shows an error. If launching the replacement fails, the helper restores the previous executable.
 
-An interrupted download or checksum mismatch leaves the installed application unchanged. Temporary downloads are removed when discarded or the app closes. Releases without a SHA-256 digest or the expected Windows executable can be opened on GitHub for manual updating. Linux, macOS, and other architectures support release checks and the release-page link; in-app binary installation is limited to the officially distributed Windows x86-64 executable.
+On Ubuntu x86-64, install the `.deb` once, then use the same **Download and install** and **Install and restart** controls. The updater checks the package size, SHA-256, package name, version and architecture. Ubuntu requests administrator authorization through polkit, and apt installs the package while the interface stays responsive. Cancelled authorization or a failed installation leaves the current window open with an error. After success the app restarts as your normal user and scans the previous root. Source builds and copied executables must first be installed from the `.deb`; package recovery is managed by apt/dpkg.
 
-Release discovery, download verification and replacement are provided by the shared `rust-auto-updator` core. The updater is built into the same portable executable. During installation it keeps a recovery copy in a private `.space-sniffer-update-*` folder beside the app; cleanup starts only after the new native host presents its first frame. The distributed download remains a single `.exe`; no separate updater installation is required. The in-app updater accepts both versioned assets and the legacy `space-sniffer.exe` name. The shared core is MIT licensed; its notice is included in `licenses/rust-auto-updator.txt`.
+An interrupted download or checksum mismatch leaves the installed application unchanged. Temporary downloads are removed when discarded or the app closes. Releases without a SHA-256 digest or the expected platform asset can be opened on GitHub for manual updating. macOS and other architectures support release checks and the release-page link.
+
+Release discovery, download verification and replacement are provided by the shared `rust-auto-updator` core. The updater is built into the application; no separate updater installation is required. Windows keeps a recovery copy in a private `.space-sniffer-update-*` folder beside the app and cleans it after the new native host presents its first frame; it accepts both versioned assets and the legacy `space-sniffer.exe` name. Ubuntu stages its verified `.deb` and restart helper in a private temporary directory, then cleans that directory after restart. The shared core is MIT licensed; its notice is included in `licenses/rust-auto-updator.txt`.
 
 ![Space Sniffer Updates settings showing the installed version, startup-check preference, and manual update check](docs/updates.png)
 
@@ -137,6 +142,18 @@ Large filters show **Filtering** progress while the previous filter stays visibl
 
 Zero-byte entries are available in the list but have no treemap area. During scanning, the inspector lists up to 100 discovered children; after completion it lists up to 100 of the largest children.
 
+## Volume colors
+
+Enable **Color by volume** to identify the filesystem containing each file. The choice persists across restarts; disabling it restores the existing file-type/Classic palette. **Volumes in view** shows the matching colors. The selected entry and hover tooltip show its volume even when coloring is disabled. **Refresh drives** rereads mount information after connecting or removing a drive; starting a scan also refreshes it. Use **F5** to refresh the file tree after mounting or unmounting inside a scanned root.
+
+On Linux, the app reads `/proc/self/mountinfo`, uses the most specific mount point, and groups bind mounts of the same device under one color. It handles nested mounts, network mounts, and paths with spaces or non-UTF-8 bytes. Virtual filesystems remain identifiable but are omitted from the drive shortcuts. A folder spanning volumes and grouped small entries use a neutral color. The twelve-color palette repeats when more volumes are present; labels distinguish them.
+
+A volume can be a partition, encrypted mapper, network share, or filesystem backed by several physical disks. These labels do not identify individual disks behind RAID/LVM. Windows uses drive roots and macOS uses `/` and `/Volumes` shortcuts; detailed Linux device discovery is isolated in its platform adapter.
+
+![Space Sniffer on Ubuntu with optional volume coloring and a volume legend](docs/ubuntu-volumes.png)
+
+A real Wayland capture of Sniffer 0.6.0 on Ubuntu with an isolated sample scan; the example files reside on one volume.
+
 ## Filters
 
 Filters apply to file basenames, ignoring case. Plain text matches a substring; patterns containing `*` or `?` match the whole name. `*` matches any number of characters and `?` matches one character. Join clauses with `;` to require all of them. Prefix a name pattern with `|` to exclude it.
@@ -160,7 +177,8 @@ Filters apply to file basenames, ignoring case. Plain text matches a substring; 
 - Sizes are logical file lengths, not allocated disk space. Compression, sparse files, filesystem metadata, and free space are not measured.
 - Hard links count separately for every path; their shared storage is not deduplicated.
 - Symbolic links and Windows reparse points, including junctions, are not traversed and contribute zero bytes. Selecting a link as the scan root produces an error.
-- Unreadable or disappearing descendants are skipped and counted. An unreadable root produces an error. A scan can therefore be partial; it does not bypass permissions.
+- Linux scans omit kernel virtual filesystems, nested RAM/image/container mounts, and recursive bind aliases. Other mounted data disks remain included. Temporary filesystems and images can be scanned by selecting them directly; kernel interfaces such as `/proc` are rejected. See [Ubuntu mount behavior](docs/ubuntu.md#mounted-filesystems-and-colors).
+- Excluded mounts and unreadable or disappearing descendants are skipped and counted. An unreadable root produces an error. A scan can therefore be partial; it does not bypass permissions.
 - Initial scans use bounded parallel directory traversal, with up to eight workers. Windows reuses metadata returned by directory enumeration. Storage and tree shape affect performance; parallel access can be slower on a hard drive.
 - Watching is event driven. Unsupported filesystems, network shares, permissions, and event overflow can affect notification delivery. If native watching fails, the sidebar reports fallback mode: full snapshots are checked every two seconds, with native watching retried every five seconds. This fallback can cost more on large roots. A scan is not an atomic filesystem snapshot.
 - The full scan is held in memory. Very large trees can take time to scan, filter, and draw. Cancellation is cooperative and cannot interrupt an operating system call already in progress.

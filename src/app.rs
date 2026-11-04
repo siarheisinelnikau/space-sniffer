@@ -16,6 +16,58 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn capture_requested() -> bool {
+    cfg!(feature = "screenshots")
+        && (std::env::var_os("EFRAME_SCREENSHOT_TO").is_some()
+            || std::env::var_os("SPACE_SNIFFER_CAPTURE_TO").is_some())
+}
+
+// eframe's legacy capture reads after buffer swap, which can be black on
+// Wayland. The viewport screenshot event reads the rendered buffer before swap.
+#[cfg(all(feature = "screenshots", not(target_os = "windows")))]
+fn capture_gpu_frame(ctx: &egui::Context) {
+    let Some(path) = std::env::var_os("SPACE_SNIFFER_CAPTURE_TO") else {
+        return;
+    };
+    let captured = ctx.input(|input| {
+        input.events.iter().find_map(|event| {
+            if let egui::Event::Screenshot { image, .. } = event {
+                Some(image.clone())
+            } else {
+                None
+            }
+        })
+    });
+    if let Some(captured) = captured {
+        assert!(
+            captured
+                .pixels
+                .iter()
+                .any(|pixel| Some(pixel) != captured.pixels.first()),
+            "GUI screenshot is blank"
+        );
+        let pixels: Vec<u8> = captured
+            .pixels
+            .iter()
+            .flat_map(|pixel| pixel.to_array())
+            .collect();
+        image::save_buffer(
+            PathBuf::from(path),
+            &pixels,
+            captured.width() as u32,
+            captured.height() as u32,
+            image::ColorType::Rgba8,
+        )
+        .expect("save GUI capture");
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    } else {
+        if ctx.cumulative_pass_nr() >= 2 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        ctx.request_repaint();
+    }
+}
+
 pub struct App {
     preferences: Preferences,
     updates_ui: crate::app_updates::Updates,
@@ -43,6 +95,9 @@ pub struct App {
     forward: Vec<PathBuf>,
     depth: usize,
     classic: bool,
+    color_by_volume: bool,
+    volumes: crate::platform::volumes::Volumes,
+    volume_refresh: Option<std::sync::mpsc::Receiver<VolumeSnapshot>>,
     help: bool,
     revision: u64,
     map_revision: u64,
@@ -64,7 +119,7 @@ impl App {
         preferences.theme.apply(ctx);
         ctx.all_styles_mut(|style| {
             #[cfg(feature = "screenshots")]
-            if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() {
+            if capture_requested() {
                 style.animation_time = 0.0;
             }
             style.spacing.item_spacing = Vec2::new(6.0, 5.0);
@@ -79,6 +134,9 @@ impl App {
         });
         let mut app = Self::empty(ctx.clone());
         app.preferences = preferences;
+        app.color_by_volume = storage
+            .and_then(|storage| eframe::get_value(storage, "color-by-volume"))
+            .unwrap_or(false);
         #[cfg(feature = "screenshots")]
         {
             if let Ok(code) = std::env::var("SPACE_SNIFFER_SCREENSHOT_LANGUAGE")
@@ -98,8 +156,7 @@ impl App {
         app.updates_ui = crate::app_updates::Updates::load(storage);
         let isolated =
             cfg!(feature = "diagnostics") && std::env::var_os("SPACE_SNIFFER_TEST_DATA").is_some();
-        let capture =
-            cfg!(feature = "screenshots") && std::env::var_os("EFRAME_SCREENSHOT_TO").is_some();
+        let capture = capture_requested();
         if !isolated && !capture {
             app.updates_ui.startup(ctx);
         }
@@ -107,11 +164,12 @@ impl App {
             app.begin_scan(path);
         }
         // Development-only capture waits for real scan data before eframe's
-        // second-frame screenshot. Normal builds never block startup here.
+        // settled-frame screenshot. Normal builds never block startup here.
         #[cfg(feature = "screenshots")]
-        if std::env::var_os("EFRAME_SCREENSHOT_TO").is_some() && app.loading {
+        if capture_requested() && app.loading {
             let deadline = Instant::now() + Duration::from_secs(30);
             while app.loading && Instant::now() < deadline {
+                app.poll_volumes();
                 app.poll_live();
                 if app.loading {
                     std::thread::sleep(Duration::from_millis(5));
@@ -122,6 +180,7 @@ impl App {
         match std::env::var("SPACE_SNIFFER_SCREENSHOT_VIEW").as_deref() {
             Ok("updates") => app.updates_ui.open = true,
             Ok("help") => app.help = true,
+            Ok("volumes") => app.color_by_volume = true,
             _ => {}
         }
         app
@@ -168,6 +227,9 @@ impl App {
             forward: Vec::new(),
             depth: 4,
             classic: false,
+            color_by_volume: false,
+            volumes: crate::platform::volumes::discover(),
+            volume_refresh: None,
             help: false,
             revision: 0,
             map_revision: 0,
@@ -193,6 +255,7 @@ impl App {
             self.forward.clear();
         }
         self.path = path.to_string_lossy().into_owned();
+        self.refresh_volumes(&path);
         let ctx = self.ctx.clone();
         self.live = Some(live::start_live_with_wake(path, move || {
             // egui's zero-delay request adds a second settling frame. A queued
@@ -208,6 +271,46 @@ impl App {
         self.updates = 0;
         self.started = Instant::now();
         self.ctx.request_repaint();
+    }
+
+    fn refresh_volumes(&mut self, root: &Path) {
+        let root = root.to_path_buf();
+        let ctx = self.ctx.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // Canonicalizing a selected root can touch a disconnected network
+        // filesystem. Keep that work off the UI, just like the shared scanner.
+        if std::thread::Builder::new()
+            .name("refresh-volumes".into())
+            .spawn(move || {
+                let drives = crate::platform::roots();
+                let mut volumes = crate::platform::volumes::discover();
+                volumes.set_root(&root);
+                if sender.send(VolumeSnapshot { drives, volumes }).is_ok() {
+                    ctx.request_repaint_after(Duration::from_millis(1));
+                }
+            })
+            .is_ok()
+        {
+            // Replacing the receiver discards stale results after a root change.
+            self.volume_refresh = Some(receiver);
+        }
+        self.map_cache = None;
+    }
+
+    fn poll_volumes(&mut self) {
+        let Some(receiver) = &self.volume_refresh else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(snapshot) => {
+                self.drives = snapshot.drives;
+                self.volumes = snapshot.volumes;
+                self.map_cache = None;
+                self.volume_refresh = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.volume_refresh = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
     }
 
     fn stop(&mut self) {
@@ -300,7 +403,7 @@ impl App {
                 LiveEvent::Progress(progress) => self.progress = Some(progress),
                 LiveEvent::Preview { start, nodes } => self.install_preview(start, nodes),
                 LiveEvent::Ready(model) => self.install_model(*model),
-                LiveEvent::Changes(changes) => self.apply_changes(&changes),
+                LiveEvent::Changes(changes) => self.receive_changes(changes),
                 LiveEvent::Status { watching, message } => {
                     self.watching = watching;
                     self.watch_status = message;
@@ -342,7 +445,11 @@ impl App {
         self.finish_install_model(model);
     }
 
-    fn prepare_model(&mut self, mut model: LiveTree, query: String) {
+    fn prepare_model(&mut self, model: LiveTree, query: String) {
+        self.prepare_map(query, move || model);
+    }
+
+    fn prepare_map(&mut self, query: String, build: impl FnOnce() -> LiveTree + Send + 'static) {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         self.prepared_model = Some(PreparedModel {
             receiver,
@@ -352,6 +459,7 @@ impl App {
         let _ = std::thread::Builder::new()
             .name("prepare-map".into())
             .spawn(move || {
+                let mut model = build();
                 let result = model.set_filter(&query).map(|()| model);
                 let _ = sender.send(result);
                 ctx.request_repaint_after(Duration::from_millis(1));
@@ -438,6 +546,24 @@ impl App {
                 Ok(_) => {}
                 Err(error) => self.error = Some(format!("Incomplete scan preview: {error}")),
             }
+        }
+    }
+
+    fn receive_changes(&mut self, mut changes: Vec<Change>) {
+        // Root reconciliation owns a complete fresh tree. Build its index and
+        // filter in the background instead of cloning/replacing millions of
+        // nodes synchronously in LiveTree::apply on the UI thread.
+        if self.loaded
+            && changes.len() == 1
+            && matches!(&changes[0], Change::ReplaceSubtree { path, tree }
+                if path == &self.model.tree.nodes[self.model.tree.root].path
+                    && (tree.nodes.len() > 16_384 || self.model.tree.nodes.len() > 16_384))
+        {
+            if let Change::ReplaceSubtree { tree, .. } = changes.remove(0) {
+                self.prepare_map(self.applied.clone(), move || LiveTree::new(tree));
+            }
+        } else {
+            self.apply_changes(&changes);
         }
     }
 
@@ -734,6 +860,9 @@ impl App {
                                 }
                             }
                         });
+                        if ui.small_button(language.text("Refresh drives")).clicked() {
+                            self.refresh_volumes(&PathBuf::from(&self.path));
+                        }
                         ui.label(
                             RichText::new(language.text("ROOT PATH"))
                                 .small()
@@ -881,7 +1010,13 @@ impl App {
                             ui.label(language.text("Depth"));
                             ui.add(egui::Slider::new(&mut self.depth, 1..=6));
                         });
-                        ui.checkbox(&mut self.classic, language.text("Classic colors"));
+                        ui.checkbox(&mut self.color_by_volume, language.text("Color by volume"));
+                        ui.add_enabled_ui(!self.color_by_volume, |ui| {
+                            ui.checkbox(&mut self.classic, language.text("Classic colors"));
+                        });
+                        if self.color_by_volume {
+                            self.volume_legend(ui);
+                        }
                         if self.loaded {
                             ui.separator();
                             self.selection(ui);
@@ -938,6 +1073,7 @@ impl App {
                 .color(palette.muted),
             );
         }
+        self.volume_details(ui, node);
         let is_dir = node.is_dir();
         let path = node.path.to_string_lossy().into_owned();
         ui.horizontal_wrapped(|ui| {
@@ -960,6 +1096,53 @@ impl App {
                 self.navigate(self.selected);
             }
         });
+    }
+
+    fn volume_details(&self, ui: &mut egui::Ui, node: &Node) {
+        let language = self.preferences.language;
+        if let Some(index) = self.volumes.find(&node.path) {
+            ui.add(
+                egui::Label::new(
+                    language.format("Volume: {0}", &[&self.volumes.entries[index].description()]),
+                )
+                .wrap(),
+            );
+            if node.is_dir() && self.volumes.tile_volume(&node.path, true, 0).is_none() {
+                ui.small(language.text("Folder totals may include other volumes."));
+            }
+        } else {
+            ui.small(language.text("Volume information unavailable"));
+        }
+    }
+
+    fn volume_legend(&self, ui: &mut egui::Ui) {
+        let language = self.preferences.language;
+        egui::CollapsingHeader::new(language.text("Volumes in view"))
+            .default_open(true)
+            .show(ui, |ui| {
+                let Some(cache) = &self.map_cache else {
+                    return;
+                };
+                let visible: std::collections::BTreeSet<_> =
+                    cache.tiles.iter().map(|tile| tile.volume).collect();
+                for index in visible {
+                    let (color, label) = match index {
+                        Some(index) => {
+                            let volume = &self.volumes.entries[index];
+                            (volume_color(volume.color), volume.description())
+                        }
+                        None => (
+                            MIXED_VOLUME_COLOR,
+                            language.text("Mixed / grouped / unknown").into(),
+                        ),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("■").color(color));
+                        ui.add(egui::Label::new(&label).truncate())
+                            .on_hover_text(&label);
+                    });
+                }
+            });
     }
 
     fn largest(&mut self, ui: &mut egui::Ui) {
@@ -1268,6 +1451,12 @@ impl App {
                     &mut tiles,
                 );
             }
+            for tile in &mut tiles {
+                let node = &self.model.tree.nodes[tile.id];
+                tile.volume = self
+                    .volumes
+                    .tile_volume(&node.path, node.is_dir(), tile.collapsed);
+            }
             self.map_cache = Some(MapCache {
                 root: self.zoom,
                 depth: self.depth,
@@ -1283,7 +1472,13 @@ impl App {
         for (index, tile) in tiles.iter().enumerate() {
             let node = &self.model.tree.nodes[tile.id];
             let rect = tile.rect.shrink(1.0);
-            let mut color = tile.colors[usize::from(self.classic)];
+            let mut color = if self.color_by_volume {
+                tile.volume
+                    .map(|index| volume_color(self.volumes.entries[index].color))
+                    .unwrap_or(MIXED_VOLUME_COLOR)
+            } else {
+                tile.colors[usize::from(self.classic)]
+            };
             if hovered == Some(index) {
                 color = color.gamma_multiply(1.17);
             }
@@ -1392,6 +1587,11 @@ impl App {
                 }
                 ui.label(format_bytes(tile.bytes));
                 ui.label(node.path.to_string_lossy());
+                if tile.collapsed == 0 {
+                    self.volume_details(ui, node);
+                } else if self.color_by_volume {
+                    ui.small(language.text("Mixed / grouped / unknown"));
+                }
                 if node.is_dir() {
                     ui.small(language.text("Double-click to zoom in"));
                 }
@@ -1434,12 +1634,14 @@ impl App {
 impl App {
     pub fn save(&self, storage: &mut dyn eframe::Storage) {
         self.preferences.save(storage);
+        eframe::set_value(storage, "color-by-volume", &self.color_by_volume);
         self.updates_ui.save(storage);
     }
 
     /// Apply bounded background work even when the native window is minimized.
     pub fn tick(&mut self, ctx: &egui::Context) {
-        self.updates_ui.poll();
+        self.poll_volumes();
+        self.updates_ui.poll(ctx);
         self.poll_live();
         self.advance_filter();
         if let Some(changed) = self.query_changed {
@@ -1539,6 +1741,8 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.draw(ctx);
+        #[cfg(feature = "screenshots")]
+        capture_gpu_frame(ctx);
     }
 }
 
@@ -1555,6 +1759,12 @@ struct DrawTile {
     bytes: u64,
     collapsed: usize,
     colors: [Color32; 2],
+    volume: Option<usize>,
+}
+
+struct VolumeSnapshot {
+    drives: Vec<PathBuf>,
+    volumes: crate::platform::volumes::Volumes,
 }
 
 struct MapCache {
@@ -1629,6 +1839,7 @@ fn collect_tiles_with_limit(
         bytes: weights[id],
         collapsed: 0,
         colors: [color(node, false, level), color(node, true, level)],
+        volume: None,
     });
     if !container || out.len() >= ceiling {
         return;
@@ -1664,6 +1875,7 @@ fn collect_tiles_with_limit(
                 bytes: items.collapsed_bytes,
                 collapsed: items.collapsed_count,
                 colors: [color(node, false, level + 1), color(node, true, level + 1)],
+                volume: None,
             });
             continue;
         }
@@ -1680,6 +1892,27 @@ fn collect_tiles_with_limit(
             ceiling - (siblings - index - 1),
         );
     }
+}
+
+const MIXED_VOLUME_COLOR: Color32 = Color32::from_rgb(76, 84, 98);
+
+fn volume_color(index: usize) -> Color32 {
+    const COLORS: [[u8; 3]; 12] = [
+        [44, 110, 155],
+        [146, 82, 51],
+        [47, 122, 94],
+        [131, 79, 151],
+        [156, 57, 89],
+        [121, 109, 40],
+        [44, 121, 133],
+        [95, 90, 166],
+        [160, 86, 109],
+        [83, 123, 49],
+        [144, 93, 128],
+        [83, 103, 137],
+    ];
+    let [r, g, b] = COLORS[index % COLORS.len()];
+    Color32::from_rgb(r, g, b)
 }
 
 fn color(node: &Node, classic: bool, level: usize) -> Color32 {
@@ -1718,6 +1951,67 @@ fn color(node: &Node, classic: bool, level: usize) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_colors_reuse_geometry_and_settings_survive_restart() {
+        #[derive(Default)]
+        struct Storage(std::collections::HashMap<String, String>);
+        impl eframe::Storage for Storage {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.into(), value);
+            }
+            fn flush(&mut self) {}
+        }
+        let ctx = egui::Context::default();
+        let mut storage = Storage::default();
+        eframe::set_value(&mut storage, "check-for-updates-on-startup", &false);
+        let mut app = App::new(&ctx, Some(&storage), None);
+        assert!(!app.color_by_volume);
+        app.install_model(LiveTree::new(tree(0)));
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.canvas(ui));
+        });
+        let before: Vec<_> = app
+            .map_cache
+            .as_ref()
+            .unwrap()
+            .tiles
+            .iter()
+            .map(|tile| (tile.id, tile.rect, tile.bytes))
+            .collect();
+        let allocation = app.map_cache.as_ref().unwrap().tiles.as_ptr();
+        app.color_by_volume = true;
+        let _ = ctx.run(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.canvas(ui));
+        });
+        assert_eq!(allocation, app.map_cache.as_ref().unwrap().tiles.as_ptr());
+        assert_eq!(
+            before,
+            app.map_cache
+                .as_ref()
+                .unwrap()
+                .tiles
+                .iter()
+                .map(|tile| (tile.id, tile.rect, tile.bytes))
+                .collect::<Vec<_>>()
+        );
+        app.save(&mut storage);
+        let restored = App::new(&ctx, Some(&storage), None);
+        assert!(restored.color_by_volume);
+        assert_eq!(
+            eframe::get_value::<bool>(&storage, "check-for-updates-on-startup"),
+            Some(false)
+        );
+        app.refresh_volumes(&PathBuf::from(&app.path));
+        assert!(app.map_cache.is_none());
+    }
 
     #[test]
     fn every_language_and_theme_settles_without_animating_the_idle_window() {
@@ -2257,6 +2551,32 @@ mod tests {
         assert_eq!(app.applied, "*.zip");
         assert_eq!((app.zoom, app.selected), (1, 2));
         assert!(app.filter_error.is_some());
+    }
+
+    #[test]
+    fn root_resync_prepares_index_off_ui_and_preserves_navigation_and_filter() {
+        let mut app = App::empty(egui::Context::default());
+        app.install_model(LiveTree::new(tree(0)));
+        app.navigate(1);
+        app.selected = 2;
+        app.query = "*.zip".into();
+        app.apply_filter();
+        let snapshot = tree(40_000);
+        app.receive_changes(vec![Change::ReplaceSubtree {
+            path: snapshot.nodes[snapshot.root].path.clone(),
+            tree: snapshot,
+        }]);
+        assert!(app.prepared_model.is_some());
+        assert_eq!(app.model.tree.nodes.len(), 4);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.prepared_model.is_some() && Instant::now() < deadline {
+            app.poll_live();
+            std::thread::yield_now();
+        }
+        assert!(app.prepared_model.is_none());
+        assert_eq!(app.model.weights[0], 40_010);
+        assert_eq!((app.zoom, app.selected), (1, 2));
+        assert_eq!(app.applied, "*.zip");
     }
 
     #[test]

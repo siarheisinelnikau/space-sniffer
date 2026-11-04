@@ -9,9 +9,16 @@
 //! accumulated, as they are during the scanner's normal directory-batch merge.
 //! --path measures complete read-only scans and does not create any files.
 
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../src/linux_mounts.rs"]
+mod linux_mounts;
 #[allow(dead_code)]
 #[path = "../src/model.rs"]
 mod model;
+#[allow(dead_code)]
+#[path = "../src/scan_scope.rs"]
+mod scan_scope;
 #[allow(dead_code)]
 #[path = "../src/scanner.rs"]
 mod scanner;

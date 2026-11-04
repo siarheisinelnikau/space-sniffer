@@ -29,14 +29,14 @@ module.exports = async ({github, context, core, root = process.cwd(), env = proc
   if (notes.length < 100 || !notes.includes(version)) throw new Error('Missing reviewed release notes.');
   const marker = `<!-- space-sniffer-publisher:v1 ${tag} ${commit} -->`;
   const markedNotes = `${notes}\n\n${marker}`;
-  const names = [`SpaceSniffer-${tag}.exe`, 'SHA256SUMS.txt'];
+  const names = [`SpaceSniffer-${tag}.exe`, `space-sniffer_${version}_amd64.deb`, 'SHA256SUMS.txt'];
   const expected = names.map(assetName => {
     const data = fs.readFileSync(path.join(root, 'release', assetName));
     if (!data.length) throw new Error(`Empty release asset: ${assetName}`);
     return {name: assetName, size: data.length, digest: digestOf(data), data};
   });
-  const checksum = `${expected[0].digest.slice(7)}  ${names[0]}`;
-  if (expected[1].data.toString('utf8').trim() !== checksum) throw new Error('The checked executable checksum differs.');
+  const checksum = expected.slice(0, -1).map(asset => `${asset.digest.slice(7)}  ${asset.name}`).join('\n');
+  if (expected.at(-1).data.toString('utf8').trim() !== checksum) throw new Error('The checked release checksums differ.');
   const lease = JSON.parse(fs.readFileSync(path.join(root, 'scripts/release-draft-lease.json'), 'utf8'));
   const activeLease = lease.tag === tag;
   if (activeLease && (lease.repository !== fullName || lease.name !== name ||

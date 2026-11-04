@@ -2,10 +2,13 @@
 pub mod export;
 pub mod filter;
 pub mod i18n;
+#[cfg(target_os = "linux")]
+pub mod linux_mounts;
 pub mod live;
 pub mod live_tree;
 pub mod map_items;
 pub mod model;
+mod scan_scope;
 pub mod scanner;
 pub mod treemap;
 pub mod updater;
