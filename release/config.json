@@ -1,0 +1,16 @@
+{
+  "repository": "siarheisinelnikau/space-sniffer",
+  "product": "SpaceSniffer",
+  "kind": "desktop",
+  "assets": [
+    {
+      "name": "SpaceSniffer-v{version}-ubuntu-amd64.deb"
+    },
+    {
+      "name": "SpaceSniffer-v{version}-windows-amd64.exe"
+    }
+  ],
+  "notices": false,
+  "checksum_aliases": [],
+  "package": "space-sniffer"
+}
