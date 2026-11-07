@@ -1,0 +1,101 @@
+name: Checked release builds
+'on':
+  workflow_call: {}
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    name: Build Windows executable
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - name: Provision shared updater source
+      shell: pwsh
+      run: ./scripts/provision-shared-updater.ps1
+    - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+      with:
+        targets: x86_64-pc-windows-msvc
+        components: rustfmt, clippy
+        toolchain: stable
+    - name: Test draft recovery without GitHub requests
+      run: node --test scripts/test_publish_release.cjs
+    - name: Formatting and lint
+      run: |
+        cargo fmt --all -- --check
+        cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+    - name: Test
+      run: cargo test --locked --all-targets --target x86_64-pc-windows-msvc
+    - name: Build release
+      run: cargo build --locked --release --target x86_64-pc-windows-msvc
+    - name: Stage versioned executable
+      shell: pwsh
+      run: |
+        $env:RELEASE_TAG = "v" + ((Get-Content Cargo.toml | Select-String '^version = "([^"]+)"$' | Select-Object -First 1).Matches.Groups[1].Value)
+        New-Item -ItemType Directory -Path release -Force | Out-Null
+        $assetName = "SpaceSniffer-${env:RELEASE_TAG}-windows-amd64.exe"
+        Copy-Item -LiteralPath target/x86_64-pc-windows-msvc/release/space-sniffer.exe -Destination "release/$assetName"
+    - name: Upload executable
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: windows-executable
+        path: release/*.exe
+        if-no-files-found: error
+    permissions:
+      contents: read
+    timeout-minutes: 30
+  ubuntu:
+    name: Build Ubuntu package
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - name: Provision shared updater source
+      shell: pwsh
+      run: ./scripts/provision-shared-updater.ps1
+    - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+      with:
+        components: rustfmt, clippy
+        toolchain: stable
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      with:
+        python-version: '3.13'
+    - name: Install build and GUI test dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential pkg-config libx11-dev \
+          libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+          libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+          libgl1-mesa-dev libegl1-mesa-dev libssl-dev xvfb xauth \
+          desktop-file-utils dpkg-dev
+    - name: Test and lint
+      run: |
+        cargo fmt --all -- --check
+        cargo clippy --locked --all-targets -- -D warnings
+        cargo test --locked --all-targets
+        python3 -m unittest discover -s scripts -p 'test_package*.py'
+    - name: Check X11 startup and Updates
+      run: |
+        cargo build --locked --features screenshots
+        python3 scripts/smoke_linux.py
+    - name: Build normal release package
+      run: |
+        cargo build --locked --release
+        python3 scripts/package_linux.py
+        desktop-file-validate packaging/linux/space-sniffer.desktop
+        dpkg-deb --info target/debian/*.deb
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: ubuntu-package
+        path: target/debian/*.deb
+        if-no-files-found: error
+    permissions:
+      contents: read
+    timeout-minutes: 30
